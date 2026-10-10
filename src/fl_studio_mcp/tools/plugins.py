@@ -162,9 +162,13 @@ def register_plugin_tools(mcp: FastMCP) -> None:
         index: int,
         slot_index: int = -1,
         use_global_index: bool = True,
-        max_params: int = 50
+        max_params: int = 50,
+        offset: int = 0,
     ) -> list[dict]:
-        """Get all parameters of a plugin with their current values.
+        """Get the parameters of a plugin with their current values.
+
+        Big plugins (VSTs like Serum expose thousands of slots) need paging
+        with offset, or use fl_find_plugin_params to search by name.
 
         For a mixer effect, the first entry (index "slot_mix") is not a plugin
         parameter but the slot's Mix knob (dry/wet) in the mixer, which scales
@@ -175,6 +179,7 @@ def register_plugin_tools(mcp: FastMCP) -> None:
             slot_index: Effect slot index for mixer plugins (-1 for channel rack)
             use_global_index: Whether to use global channel indexing
             max_params: Maximum number of parameters to return (default 50)
+            offset: Index of the first parameter to return (default 0)
         """
         conn = get_connection()
         result = conn.send_command("plugins.getParams", {
@@ -182,7 +187,8 @@ def register_plugin_tools(mcp: FastMCP) -> None:
             "slot_index": slot_index,
             "use_global": use_global_index,
             "max_params": max_params,
-        })
+            "offset": offset,
+        }, timeout=15.0)
 
         if not result.get("success", False) and "error" in result:
             return [{"error": result["error"]}]
@@ -198,6 +204,45 @@ def register_plugin_tools(mcp: FastMCP) -> None:
                 "slot_enabled": slot.get("enabled", True),
             })
         return params
+
+    @mcp.tool()
+    def fl_find_plugin_params(
+        index: int,
+        query: str,
+        slot_index: int = -1,
+        use_global_index: bool = True,
+        max_results: int = 40,
+    ) -> list[dict]:
+        """Search a plugin's parameters by name (case-insensitive substring).
+
+        Use it on big plugins, e.g. query "env 1" or "cutoff" on Serum.
+
+        Args:
+            index: Channel index (global) or mixer track index
+            query: Text to look for in parameter names
+            slot_index: Effect slot index for mixer plugins (-1 for channel rack)
+            use_global_index: Whether to use global channel indexing
+            max_results: Maximum number of matches to return (default 40)
+        """
+        if not query.strip():
+            return [{"error": "query must not be empty"}]
+
+        conn = get_connection()
+        result = conn.send_command("plugins.getParams", {
+            "index": index,
+            "slot_index": slot_index,
+            "use_global": use_global_index,
+            "max_params": max_results,
+            "name_filter": query.strip(),
+        }, timeout=15.0)
+
+        if not result.get("success", False) and "error" in result:
+            return [{"error": result["error"]}]
+
+        matches = result.get("params", [])
+        if not matches:
+            return [{"error": f"No parameter name contains '{query}'"}]
+        return matches
 
     @mcp.tool()
     def fl_get_plugin_param_value(

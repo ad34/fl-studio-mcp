@@ -24,6 +24,7 @@ from fl_studio_mcp.tools import (
     register_channel_tools,
     register_mixer_tools,
     register_piano_roll_tools,
+    register_playlist_tools,
     register_plugin_tools,
     register_transport_tools,
 )
@@ -44,6 +45,8 @@ Available tool categories:
   effect slots (load, mix/dry-wet, bypass), routing and send levels
 - Channels: Channel info, note triggering, step sequencer
 - Plugins: Parameter control, preset navigation, plugin search
+- Patterns: create, select, read the current one (piano roll edits go to it)
+- Playlist: markers, track names and colors
 
 Mixer effect slots have their own Mix knob (dry/wet) that scales the whole
 effect and is not a plugin parameter. Check it (fl_get_track_fx or
@@ -52,7 +55,8 @@ fl_get_mixer_track_info) before judging how strong an effect is.
 Important limitations:
 1. Effects can be loaded into mixer slots (fl_load_effect), but instruments
    can't be added to the channel rack - only existing ones can be controlled
-2. Cannot create new patterns programmatically
+2. Clips can't be placed or read in the playlist (no API): lay out sections
+   with markers (fl_add_markers) and let the user drag patterns onto them
 3. Note triggering (fl_trigger_note) is real-time only - notes won't persist
    unless FL Studio is recording. Use step sequencer (fl_set_grid_bit) for
    persistent drum patterns.
@@ -146,6 +150,7 @@ register_mixer_tools(mcp)
 register_channel_tools(mcp)
 register_plugin_tools(mcp)
 register_piano_roll_tools(mcp)
+register_playlist_tools(mcp)
 
 
 def main():

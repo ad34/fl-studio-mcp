@@ -75,7 +75,32 @@ def register_transport_tools(mcp: FastMCP) -> None:
             "is_recording": result.get("is_recording", False),
             "position": result.get("position", ""),
             "loop_mode": result.get("loop_mode", "pattern"),
+            "tempo": result.get("tempo", 0),
         }
+
+    @mcp.tool()
+    def fl_set_tempo(bpm: float) -> str:
+        """Set the project tempo.
+
+        Args:
+            bpm: Tempo in beats per minute (10 to 522, FL Studio's range)
+        """
+        if not 10 <= bpm <= 522:
+            return "Error: Tempo must be between 10 and 522 BPM"
+
+        conn = get_connection()
+        result = conn.send_command("transport.setTempo", {"bpm": bpm})
+
+        if not result.get("success", False) and "error" in result:
+            return f"Error: {result['error']}"
+
+        status = conn.read_until(
+            "transport.getStatus", {}, lambda r: abs(r.get("tempo", 0) - bpm) < 0.01
+        )
+        tempo = status.get("tempo", 0)
+        if abs(tempo - bpm) >= 0.01:
+            return f"Error: tempo is still {tempo:g} BPM"
+        return f"Tempo set to {tempo:g} BPM"
 
     @mcp.tool()
     def fl_set_song_position(position: float, mode: int = 2) -> str:

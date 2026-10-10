@@ -223,7 +223,7 @@ def add_notes_to_piano_roll(request):
         "action": "add_notes",
         "notes": [
             {"midi": 60, "time": 0, "duration": 1.0, "velocity": 0.8},
-            {"midi": 64, "time": 1.0, "duration": 0.5},
+            {"midi": 64, "time": 1.0, "duration": 0.5, "slide": true},
         ]
     }
     """
@@ -238,6 +238,8 @@ def add_notes_to_piano_roll(request):
             midi_note.time = int(ppq * note_time)
             midi_note.length = int(ppq * note_data["duration"])
             midi_note.velocity = note_data.get("velocity", 0.8)
+            midi_note.slide = bool(note_data.get("slide", False))
+            midi_note.porta = bool(note_data.get("porta", False))
             flp.score.addNote(midi_note)
 
         return {

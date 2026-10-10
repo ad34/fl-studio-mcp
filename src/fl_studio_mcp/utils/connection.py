@@ -13,7 +13,8 @@ The communication flow is:
 
 from __future__ import annotations
 
-from typing import Any
+import time
+from typing import Any, Callable
 
 from fl_studio_mcp.utils.midi_connection import (
     get_connection as get_midi_connection,
@@ -67,6 +68,26 @@ class FLConnection:
             RuntimeError: If not connected or command fails
         """
         return self._midi.send_command(action, params, timeout)
+
+    def read_until(
+        self,
+        action: str,
+        params: dict[str, Any] | None,
+        done: Callable[[dict[str, Any]], bool],
+        timeout: float = 1.5,
+    ) -> dict[str, Any]:
+        """Repeat a read command until `done(result)` holds or the timeout expires.
+
+        FL applies some changes (slot mix and on/off, stereo separation,
+        volume, tempo) only after the command that made them returns, so they
+        have to be confirmed with separate read commands. Returns the last read.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            result = self.send_command(action, params)
+            if done(result) or time.monotonic() >= deadline:
+                return result
+            time.sleep(0.05)
 
     def get_status(self) -> dict[str, Any]:
         """Get connection status information."""

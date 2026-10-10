@@ -2,30 +2,10 @@
 
 from __future__ import annotations
 
-import time
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP
-
-
-def _wait_for(
-    read: Callable[[], dict[str, Any]],
-    done: Callable[[dict[str, Any]], bool],
-    timeout: float = 1.5,
-) -> dict[str, Any]:
-    """Re-read FL Studio until `done` holds or the timeout expires.
-
-    FL applies some changes (slot mix and on/off, stereo separation) only
-    after the command that made them returns, so they have to be confirmed
-    with separate read commands. Returns the last read.
-    """
-    deadline = time.monotonic() + timeout
-    while True:
-        result = read()
-        if done(result) or time.monotonic() >= deadline:
-            return result
-        time.sleep(0.05)
 
 
 def _find_slot(track_fx: dict[str, Any], slot: int) -> dict[str, Any]:
@@ -49,6 +29,74 @@ def register_mixer_tools(mcp: FastMCP) -> None:
             return -1  # Return -1 to indicate error
 
         return result.get("count", 0)
+
+    @mcp.tool()
+    def fl_measure_levels(start_bar: int = 1, seconds: float = 20.0, interval: float = 0.1) -> dict:
+        """Play the song and measure every mixer track's level from its peak meter.
+
+        Starts playback at `start_bar` (song mode), samples all peak meters every
+        `interval` seconds for `seconds`, then stops. Use it for gain staging and
+        to spot clipping. Tracks that stayed silent are left out.
+
+        Returns per track: peak_db (highest peak), avg_db (average of the peak
+        meter while it had signal - a loudness indication, not LUFS) and
+        clip_pct (share of samples at or above 0 dBFS).
+
+        Args:
+            start_bar: Bar to start from (1 = song start)
+            seconds: How long to listen (max 120)
+            interval: Seconds between two meter readings (min 0.05)
+        """
+        import math
+        import time
+
+        conn = get_connection()
+        seconds = min(max(seconds, 1.0), 120.0)
+        interval = max(interval, 0.05)
+        status = conn.send_command("transport.getStatus")
+        if status.get("is_playing"):
+            conn.send_command("transport.stop")
+        if status.get("loop_mode") != "song":
+            conn.send_command("transport.setLoopMode", {"mode": "song"})
+        result = conn.send_command("transport.setPosition", {"bar": start_bar})
+        if not result.get("success", False) and "error" in result:
+            return {"error": result["error"]}
+
+        samples: list[list[float]] = []
+        conn.send_command("transport.start")
+        try:
+            end = time.monotonic() + seconds
+            while time.monotonic() < end:
+                peaks = conn.send_command("mixer.getPeaks").get("peaks")
+                if peaks:
+                    samples.append(peaks)
+                time.sleep(interval)
+        finally:
+            conn.send_command("transport.stop")
+            if status.get("loop_mode") != "song":
+                previous = status.get("loop_mode", "pattern")
+                conn.send_command("transport.setLoopMode", {"mode": previous})
+
+        if not samples:
+            return {"error": "No meter readings (is FL Studio playing audio?)"}
+        all_tracks = conn.send_command("mixer.getAllTracks", {"include_empty": True})
+        names = {t["index"]: t["name"] for t in all_tracks.get("tracks", [])}
+        tracks = []
+        for track in range(len(samples[0])):
+            values = [s[track] for s in samples if track < len(s)]
+            heard = [v for v in values if v > 1e-4]                 # above -80 dBFS
+            if not heard:
+                continue
+            db = [20 * math.log10(v) for v in heard]
+            tracks.append({
+                "track": track,
+                "name": names.get(track, f"Insert {track}"),
+                "peak_db": round(max(db), 1),
+                "avg_db": round(sum(db) / len(db), 1),
+                "clip_pct": round(100 * sum(v >= 1.0 for v in values) / len(values), 1),
+            })
+        return {"start_bar": start_bar, "seconds": seconds, "readings": len(samples),
+                "tracks": tracks}
 
     @mcp.tool()
     def fl_get_mixer_track_info(track: int) -> dict:
@@ -120,8 +168,12 @@ def register_mixer_tools(mcp: FastMCP) -> None:
         if not result.get("success", False) and "error" in result:
             return f"Error: {result['error']}"
 
-        new_vol = result.get("volume", 0)
-        new_vol_db = result.get("volume_db", 0)
+        info = conn.read_until(
+            "mixer.getTrackInfo", {"track": track},
+            lambda r: abs(r.get("volume", -1.0) - volume) < 0.005,
+        )
+        new_vol = info.get("volume", 0)
+        new_vol_db = info.get("volume_db", 0)
         return f"Track {track} volume set to {new_vol:.3f} ({new_vol_db:.1f} dB)"
 
     @mcp.tool()
@@ -145,7 +197,11 @@ def register_mixer_tools(mcp: FastMCP) -> None:
         if not result.get("success", False) and "error" in result:
             return f"Error: {result['error']}"
 
-        new_pan = result.get("pan", 0)
+        info = conn.read_until(
+            "mixer.getTrackInfo", {"track": track},
+            lambda r: abs(r.get("pan", 99.0) - pan) < 0.01,
+        )
+        new_pan = info.get("pan", 0)
         if new_pan < -0.01:
             direction = f"{abs(new_pan) * 100:.0f}% left"
         elif new_pan > 0.01:
@@ -287,8 +343,8 @@ def register_mixer_tools(mcp: FastMCP) -> None:
             return f"Error: {result['error']}"
 
         # FL stores separation in 1/64 steps, hence the tolerance
-        info = _wait_for(
-            lambda: conn.send_command("mixer.getTrackInfo", {"track": track}),
+        info = conn.read_until(
+            "mixer.getTrackInfo", {"track": track},
             lambda r: abs(r.get("stereo_separation", 99) - separation) < 0.02,
         )
         actual = info.get("stereo_separation", 0.0)
@@ -353,8 +409,8 @@ def register_mixer_tools(mcp: FastMCP) -> None:
         if not result.get("success", False) and "error" in result:
             return f"Error: {result['error']}"
 
-        track_fx = _wait_for(
-            lambda: conn.send_command("mixer.getTrackFx", {"track": track}),
+        track_fx = conn.read_until(
+            "mixer.getTrackFx", {"track": track},
             lambda r: abs(_find_slot(r, slot).get("mix", -1.0) - mix) < 0.01,
         )
         state = _find_slot(track_fx, slot)
@@ -385,8 +441,8 @@ def register_mixer_tools(mcp: FastMCP) -> None:
         if not result.get("success", False) and "error" in result:
             return f"Error: {result['error']}"
 
-        track_fx = _wait_for(
-            lambda: conn.send_command("mixer.getTrackFx", {"track": track}),
+        track_fx = conn.read_until(
+            "mixer.getTrackFx", {"track": track},
             lambda r: _find_slot(r, slot).get("enabled") == enabled,
         )
         name = result.get("name", f"Slot {slot}")

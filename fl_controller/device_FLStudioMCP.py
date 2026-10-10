@@ -24,11 +24,14 @@ import sys
 from pathlib import Path
 
 # FL Studio API modules (available when running inside FL Studio)
+import arrangement
 import channels
 import device
 import general
 import midi
 import mixer
+import patterns
+import playlist
 import plugins
 import transport
 import ui
@@ -145,6 +148,32 @@ def dispatch_command(action: str, params: dict) -> dict:
         return handle_transport_set_loop_mode(params)
     elif action == "transport.setPlaybackSpeed":
         return handle_transport_set_playback_speed(params)
+    elif action == "transport.setTempo":
+        return handle_transport_set_tempo(params)
+
+    # UI commands
+    elif action == "ui.openPianoRoll":
+        return handle_ui_open_piano_roll(params)
+    elif action == "ui.closePianoRoll":
+        return handle_ui_close_piano_roll()
+
+    # Pattern commands
+    elif action == "patterns.getCurrent":
+        return handle_patterns_get_current()
+    elif action == "patterns.select":
+        return handle_patterns_select(params)
+    elif action == "patterns.create":
+        return handle_patterns_create(params)
+
+    # Arrangement / playlist commands
+    elif action == "arrangement.getMarkers":
+        return handle_arrangement_get_markers()
+    elif action == "arrangement.addMarkers":
+        return handle_arrangement_add_markers(params)
+    elif action == "playlist.getTracks":
+        return handle_playlist_get_tracks(params)
+    elif action == "playlist.setTrack":
+        return handle_playlist_set_track(params)
 
     # Mixer commands
     elif action == "mixer.getTrackCount":
@@ -181,6 +210,8 @@ def dispatch_command(action: str, params: dict) -> dict:
         return handle_mixer_set_route(params)
     elif action == "mixer.loadPlugin":
         return handle_mixer_load_plugin(params)
+    elif action == "mixer.getPeaks":
+        return handle_mixer_get_peaks()
 
     # Channel commands
     elif action == "channels.getCount":
@@ -274,16 +305,25 @@ def handle_transport_record() -> dict:
 def handle_transport_get_status() -> dict:
     """Get transport status."""
     loop_mode = transport.getLoopMode()
+    # getCurrentTempo() has been seen returning both BPM and thousandths of a
+    # BPM; FL's tempo never goes above 522 BPM, so the magnitude tells them apart
+    tempo = mixer.getCurrentTempo()
     return {
         "is_playing": transport.isPlaying() == 1,
         "is_recording": transport.isRecording() == 1,
         "position": transport.getSongPosHint(),
         "loop_mode": "song" if loop_mode == 1 else "pattern",
+        "tempo": tempo / 1000 if tempo > 1000 else tempo,
     }
 
 
 def handle_transport_set_position(params: dict) -> dict:
     """Set playback position."""
+    if "bar" in params:
+        # Bar numbers start at 1, as in the playlist ruler (4/4)
+        ticks = (params["bar"] - 1) * 4 * general.getRecPPQ()
+        transport.setSongPos(int(ticks), midi.SONGLENGTH_ABSTICKS)
+        return {"position": transport.getSongPosHint()}
     position = params.get("position", 0)
     mode = params.get("mode", 2)  # Default: seconds
     transport.setSongPos(position, mode)
@@ -318,9 +358,151 @@ def handle_transport_set_playback_speed(params: dict) -> dict:
     return {"speed": speed}
 
 
+def handle_transport_set_tempo(params: dict) -> dict:
+    """Set the project tempo in BPM."""
+    bpm = params.get("bpm", 120.0)
+    # The tempo REC event takes thousandths of a BPM
+    general.processRECEvent(
+        midi.REC_Tempo, round(bpm * 1000), midi.REC_Control | midi.REC_UpdateControl
+    )
+    return {"bpm": bpm}
+
+
+# =============================================================================
+# UI Handlers
+# =============================================================================
+
+
+def handle_ui_open_piano_roll(params: dict) -> dict:
+    """Open the piano roll on a channel so piano roll scripts act on it."""
+    index = params.get("channel", 0)
+    if not 0 <= index < channels.channelCount(True):
+        raise ValueError(f"Channel {index} does not exist")
+    # A channel hidden by the channel rack's group filter can't get the piano
+    # roll: FL opens it on a visible channel instead, and notes land there
+    visible = {channels.getChannelIndex(i) for i in range(channels.channelCount())}
+    if index not in visible:
+        raise ValueError(
+            f"Channel {index} is hidden by the channel rack filter; set the filter to All"
+        )
+    channels.selectOneChannel(index, True)
+    # The piano roll opens on the selected channel, but an open one stays on
+    # its channel, so close it first
+    if ui.getVisible(midi.widPianoRoll):
+        ui.hideWindow(midi.widPianoRoll)
+    ui.showWindow(midi.widPianoRoll)
+    ui.setFocused(midi.widPianoRoll)
+    return {"channel_name": channels.getChannelName(index, True)}
+
+
+def handle_ui_close_piano_roll() -> dict:
+    """Close the piano roll."""
+    ui.hideWindow(midi.widPianoRoll)
+    return {"closed": True}
+
+
+# =============================================================================
+# Pattern Handlers
+# =============================================================================
+
+
+def handle_patterns_get_current() -> dict:
+    """Get the selected pattern (patterns are numbered from 1)."""
+    index = patterns.patternNumber()
+    return {
+        "index": index,
+        "name": patterns.getPatternName(index),
+        "count": patterns.patternCount(),
+    }
+
+
+def handle_patterns_select(params: dict) -> dict:
+    """Select a pattern by number."""
+    index = params.get("index", 1)
+    if not 1 <= index <= patterns.patternCount():
+        raise ValueError(f"Pattern {index} does not exist")
+    patterns.jumpToPattern(index)
+    return {"index": index, "name": patterns.getPatternName(index)}
+
+
+# =============================================================================
+# Arrangement / Playlist Handlers
+# =============================================================================
+
+
+def _marker_names() -> list:
+    names = []
+    while len(names) < 999:
+        name = arrangement.getMarkerName(len(names))
+        if not name:
+            break
+        names.append(name)
+    return names
+
+
+def handle_arrangement_get_markers() -> dict:
+    """Names of the playlist markers, in order (FL doesn't expose their times)."""
+    return {"markers": _marker_names()}
+
+
+def handle_arrangement_add_markers(params: dict) -> dict:
+    """Add markers at bar numbers (from 1); names already present are skipped."""
+    beats_per_bar = params.get("beats_per_bar", 4)
+    ticks_per_bar = general.getRecPPQ() * beats_per_bar
+    existing = set(_marker_names())
+    added, skipped = [], []
+    for marker in params.get("markers", []):
+        bar, name = marker["bar"], marker["name"]
+        if bar < 1:
+            raise ValueError(f"Bar numbers start at 1 (got {bar})")
+        if name in existing:
+            skipped.append(name)
+            continue
+        arrangement.addAutoTimeMarker(int((bar - 1) * ticks_per_bar), name)
+        existing.add(name)
+        added.append(name)
+    return {"added": added, "skipped": skipped}
+
+
+def handle_playlist_get_tracks(params: dict) -> dict:
+    """Names and colors of the first playlist tracks (numbered from 1)."""
+    count = min(params.get("count", 20), playlist.trackCount())
+    return {"tracks": [
+        {"index": i, "name": playlist.getTrackName(i), "color": playlist.getTrackColor(i)}
+        for i in range(1, count + 1)
+    ]}
+
+
+def handle_playlist_set_track(params: dict) -> dict:
+    """Rename and/or recolor a playlist track (numbered from 1)."""
+    index = params.get("index", 1)
+    if not 1 <= index <= playlist.trackCount():
+        raise ValueError(f"Playlist track {index} does not exist")
+    if "name" in params:
+        playlist.setTrackName(index, params["name"])
+    if "color" in params:
+        playlist.setTrackColor(index, params["color"])
+    return {"index": index, "name": playlist.getTrackName(index), "color": playlist.getTrackColor(index)}
+
+
+def handle_patterns_create(params: dict) -> dict:
+    """Select the first empty pattern, optionally naming it."""
+    name = params.get("name", "")
+    patterns.findFirstNextEmptyPat(midi.FFNEP_DontPromptName)
+    index = patterns.patternNumber()
+    if name:
+        patterns.setPatternName(index, name)
+    return {"index": index, "name": patterns.getPatternName(index)}
+
+
 # =============================================================================
 # Mixer Handlers
 # =============================================================================
+
+
+def handle_mixer_get_peaks() -> dict:
+    """Current peak meter of every mixer track (1.0 = 0 dBFS), for level sampling."""
+    return {"peaks": [mixer.getTrackPeaks(t, 2) for t in range(mixer.trackCount() - 1)]}
 
 
 def handle_mixer_get_track_count() -> dict:
@@ -956,9 +1138,14 @@ def handle_plugins_get_name(params: dict) -> dict:
     if slot_index >= 0:
         name = plugins.getPluginName(index, slot_index, True)
     else:
-        name = plugins.getPluginName(index, -1, use_global)
+        # The 3rd argument is userName, not useGlobalIndex
+        name = plugins.getPluginName(index, -1, False, use_global)
 
-    return {"name": name}
+    try:
+        preset = plugins.getName(index, slot_index, midi.FPN_Preset, 0, use_global)
+    except Exception:
+        preset = ""
+    return {"name": name, "preset": preset}
 
 
 def handle_plugins_get_param_count(params: dict) -> dict:
@@ -976,11 +1163,13 @@ def handle_plugins_get_param_count(params: dict) -> dict:
 
 
 def handle_plugins_get_params(params: dict) -> dict:
-    """Get all plugin parameters."""
+    """Get plugin parameters, optionally from an offset or filtered by name."""
     index = params.get("index", 0)
     slot_index = params.get("slot_index", -1)
     use_global = params.get("use_global", True)
     max_params = params.get("max_params", 50)
+    offset = params.get("offset", 0)
+    name_filter = params.get("name_filter", "").lower()
 
     if slot_index >= 0:
         param_count = plugins.getParamCount(index, slot_index, True)
@@ -988,14 +1177,21 @@ def handle_plugins_get_params(params: dict) -> dict:
         param_count = plugins.getParamCount(index, -1, use_global)
 
     param_list = []
-    for i in range(min(param_count, max_params)):
+    for i in range(offset, param_count):
+        if len(param_list) >= max_params:
+            break
         try:
             if slot_index >= 0:
                 name = plugins.getParamName(i, index, slot_index, True)
+            else:
+                name = plugins.getParamName(i, index, -1, use_global)
+            if name_filter and name_filter not in name.lower():
+                continue
+
+            if slot_index >= 0:
                 value = plugins.getParamValue(i, index, slot_index, True)
                 value_str = plugins.getParamValueString(i, index, slot_index, True)
             else:
-                name = plugins.getParamName(i, index, -1, use_global)
                 value = plugins.getParamValue(i, index, -1, use_global)
                 value_str = plugins.getParamValueString(i, index, -1, use_global)
 
@@ -1009,7 +1205,7 @@ def handle_plugins_get_params(params: dict) -> dict:
             print(f"Warning: could not read param {i}: {e}")
             continue
 
-    response = {"params": param_list}
+    response = {"params": param_list, "param_count": param_count}
     if slot_index >= 0 and mixer.isTrackPluginValid(index, slot_index):
         # The slot's Mix knob scales the whole effect but isn't a plugin param
         response["slot"] = _slot_info(index, slot_index)
@@ -1094,7 +1290,7 @@ def handle_plugins_next_preset(params: dict) -> dict:
         plugin_name = plugins.getPluginName(index, slot_index, True)
         plugins.nextPreset(index, slot_index, True)
     else:
-        plugin_name = plugins.getPluginName(index, -1, use_global)
+        plugin_name = plugins.getPluginName(index, -1, False, use_global)
         plugins.nextPreset(index, -1, use_global)
 
     return {"plugin_name": plugin_name}
@@ -1110,7 +1306,7 @@ def handle_plugins_prev_preset(params: dict) -> dict:
         plugin_name = plugins.getPluginName(index, slot_index, True)
         plugins.prevPreset(index, slot_index, True)
     else:
-        plugin_name = plugins.getPluginName(index, -1, use_global)
+        plugin_name = plugins.getPluginName(index, -1, False, use_global)
         plugins.prevPreset(index, -1, use_global)
 
     return {"plugin_name": plugin_name}

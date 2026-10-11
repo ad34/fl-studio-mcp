@@ -15,6 +15,55 @@ from typing import Callable
 TRIGGER_DELAY = 2.0
 
 
+def _find_fl_window() -> tuple[int | None, str | None]:
+    """Find FL Studio's main window on Windows: (hwnd, title), or (None, None).
+
+    Uses only ctypes/user32 so no extra dependency is required.
+    """
+    if platform.system() != "Windows":
+        return None, None
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    found: dict = {"hwnd": None, "title": None}
+
+    EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+    def _enum(hwnd, _lparam):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length == 0:
+            return True
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buffer, length + 1)
+        # FL Studio's main window title contains "FL Studio"
+        if "FL Studio" in buffer.value:
+            found["hwnd"], found["title"] = hwnd, buffer.value
+            return False  # stop enumerating
+        return True
+
+    user32.EnumWindows(EnumWindowsProc(_enum), 0)
+    return found["hwnd"], found["title"]
+
+
+def fl_project_file() -> str | None:
+    """Name of the open project file, read from FL's window title.
+
+    The scripting API doesn't expose it (ui.getProgTitle() is just
+    "FL Studio 2026"). Windows only; None when unknown or unsaved.
+    """
+    try:
+        _hwnd, title = _find_fl_window()
+    except Exception:
+        return None
+    # e.g. "breaks_and_stabs-claude.flp - FL Studio 2026"
+    if title and " - FL Studio" in title:
+        return title.rsplit(" - FL Studio", 1)[0]
+    return None
+
+
 class FLStudioTrigger:
     """Handles triggering FL Studio's Piano Roll script via keystrokes.
 
@@ -101,33 +150,10 @@ class FLStudioTrigger:
         """
         try:
             import ctypes
-            from ctypes import wintypes
 
             user32 = ctypes.windll.user32
 
-            found = {"hwnd": None}
-
-            EnumWindowsProc = ctypes.WINFUNCTYPE(
-                ctypes.c_bool, wintypes.HWND, wintypes.LPARAM
-            )
-
-            def _enum(hwnd, _lparam):
-                if not user32.IsWindowVisible(hwnd):
-                    return True
-                length = user32.GetWindowTextLengthW(hwnd)
-                if length == 0:
-                    return True
-                buffer = ctypes.create_unicode_buffer(length + 1)
-                user32.GetWindowTextW(hwnd, buffer, length + 1)
-                # FL Studio's main window title contains "FL Studio"
-                if "FL Studio" in buffer.value:
-                    found["hwnd"] = hwnd
-                    return False  # stop enumerating
-                return True
-
-            user32.EnumWindows(EnumWindowsProc(_enum), 0)
-
-            hwnd = found["hwnd"]
+            hwnd, _title = _find_fl_window()
             if not hwnd:
                 return False
 

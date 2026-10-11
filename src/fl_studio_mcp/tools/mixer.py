@@ -57,10 +57,22 @@ def register_mixer_tools(mcp: FastMCP) -> None:
         if status.get("is_playing"):
             conn.send_command("transport.stop")
         if status.get("loop_mode") != "song":
+            # FL switches mode only after the command returns: setting the
+            # position before that moves the pattern position, and playback
+            # then starts wherever the song was last stopped
             conn.send_command("transport.setLoopMode", {"mode": "song"})
-        result = conn.send_command("transport.setPosition", {"bar": start_bar})
-        if not result.get("success", False) and "error" in result:
-            return {"error": result["error"]}
+            conn.read_until("transport.getStatus", None,
+                            lambda s: s.get("loop_mode") == "song")
+        for _ in range(5):
+            result = conn.send_command("transport.setPosition", {"bar": start_bar})
+            if not result.get("success", False) and "error" in result:
+                return {"error": result["error"]}
+            at_start = conn.read_until(
+                "transport.getStatus", None,
+                lambda s: str(s.get("position", "")).startswith(f"{start_bar}:"),
+                timeout=0.5)
+            if str(at_start.get("position", "")).startswith(f"{start_bar}:"):
+                break
 
         samples: list[list[float]] = []
         conn.send_command("transport.start")
@@ -68,7 +80,9 @@ def register_mixer_tools(mcp: FastMCP) -> None:
             end = time.monotonic() + seconds
             while time.monotonic() < end:
                 peaks = conn.send_command("mixer.getPeaks").get("peaks")
-                if peaks:
+                # Now and then a reading comes back with many tracks, empty
+                # ones included, at exactly 1.0, or a track 12 dB over: drop it
+                if peaks and sum(v == 1.0 for v in peaks) < 4 and max(peaks) < 4.0:
                     samples.append(peaks)
                 time.sleep(interval)
         finally:

@@ -295,21 +295,39 @@ def register_plugin_tools(mcp: FastMCP) -> None:
             use_global_index: Whether to use global channel indexing
         """
         conn = get_connection()
-        result = conn.send_command("plugins.setParamValue", {
+        location = {
             "param_index": param_index,
-            "value": value,
             "plugin_index": plugin_index,
             "slot_index": slot_index,
             "use_global": use_global_index,
-        })
+        }
 
-        if not result.get("success", False) and "error" in result:
-            return f"Error: {result['error']}"
+        def applied(read: dict) -> bool:
+            return abs(read.get("value", -1.0) - value) < 0.002
 
-        name = result.get("name", f"Parameter {param_index}")
-        new_value = result.get("value", value)
-        value_str = result.get("value_string", "")
-        return f"Parameter '{name}' set to {new_value:.4f} ({value_str})"
+        # FL intermittently ignores a write (VST3 effects as well as Fruity
+        # ones), and the value it reports inside the same command is stale.
+        # Confirm with separate reads and write again until it holds.
+        attempts = 6
+        for attempt in range(1, attempts + 1):
+            result = conn.send_command("plugins.setParamValue", {**location, "value": value})
+            if not result.get("success", False) and "error" in result:
+                return f"Error: {result['error']}"
+            read = conn.read_until("plugins.getParamValue", location, applied, timeout=0.5)
+            if applied(read):
+                break
+
+        name = read.get("name", result.get("name", f"Parameter {param_index}"))
+        value_str = read.get("value_string", "")
+        if not applied(read):
+            return (
+                f"Parameter '{name}' did not take {value:.4f} after {attempts} writes; "
+                f"it reads {read.get('value', 0):.4f} ({value_str}). An automation clip "
+                "or a controller link (e.g. Fruity peak controller) may drive it: "
+                "use fl_set_fx_mix on the slot instead."
+            )
+        retries = f" after {attempt} writes" if attempt > 1 else ""
+        return f"Parameter '{name}' set to {read['value']:.4f} ({value_str}){retries}"
 
     @mcp.tool()
     def fl_get_preset_count(

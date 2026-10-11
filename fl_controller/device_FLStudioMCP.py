@@ -151,6 +151,12 @@ def dispatch_command(action: str, params: dict) -> dict:
     elif action == "transport.setTempo":
         return handle_transport_set_tempo(params)
 
+    # Project commands
+    elif action == "project.getState":
+        return handle_project_get_state()
+    elif action == "project.save":
+        return handle_project_save(params)
+
     # UI commands
     elif action == "ui.openPianoRoll":
         return handle_ui_open_piano_roll(params)
@@ -332,11 +338,30 @@ def handle_transport_set_position(params: dict) -> dict:
 
 def handle_transport_get_length() -> dict:
     """Get song length."""
+    # Modes: 0 = ms, 1 = seconds, 2 = absolute ticks, 3 = bars
     return {
-        "ticks": transport.getSongLength(3),
-        "seconds": transport.getSongLength(2),
-        "milliseconds": transport.getSongLength(1),
+        "bars": transport.getSongLength(3),
+        "ticks": transport.getSongLength(2),
+        "seconds": transport.getSongLength(1),
+        "milliseconds": transport.getSongLength(0),
     }
+
+
+def handle_project_get_state() -> dict:
+    """Unsaved-changes flag (the API doesn't expose the project file name)."""
+    changed = general.getChangedFlag()
+    return {
+        # 0 = saved, 1 = unsaved changes, 2 = unsaved but covered by an autosave
+        "changed": changed,
+        "unsaved_changes": changed != 0,
+    }
+
+
+def handle_project_save(params: dict) -> dict:
+    """Save the project like Ctrl+S, or as a new version like Ctrl+N."""
+    command = midi.FPT_SaveNew if params.get("new_version", False) else midi.FPT_Save
+    transport.globalTransport(command, 1)
+    return {"saved": True, "new_version": command == midi.FPT_SaveNew}
 
 
 def handle_transport_set_loop_mode(params: dict) -> dict:
@@ -899,7 +924,9 @@ def handle_channels_get_info(params: dict) -> dict:
         "index": index,
         "name": channels.getChannelName(index, use_global),
         "color": hex(channels.getChannelColor(index, use_global)),
-        "volume": channels.getChannelVolume(index, use_global),
+        # getChannelVolume's 2nd argument is mode (dB), NOT useGlobalIndex:
+        # passed positionally, the index is read in the displayed channel group
+        "volume": channels.getChannelVolume(index, useGlobalIndex=use_global),
         "pan": channels.getChannelPan(index, use_global),
         "pitch": channels.getChannelPitch(index, useGlobalIndex=use_global),
         "is_muted": channels.isChannelMuted(index, use_global) == 1,
@@ -937,7 +964,7 @@ def handle_channels_get_selected() -> dict:
         "channel": {
             "index": index,
             "name": channels.getChannelName(index, True),
-            "volume": channels.getChannelVolume(index, True),
+            "volume": channels.getChannelVolume(index, useGlobalIndex=True),
             "pan": channels.getChannelPan(index, True),
             "is_muted": channels.isChannelMuted(index, True) == 1,
             "is_solo": channels.isChannelSolo(index, True) == 1,
@@ -977,9 +1004,10 @@ def handle_channels_set_volume(params: dict) -> dict:
     """Set channel volume."""
     index = params.get("index", 0)
     volume = params.get("volume", 0.8)
-    channels.setChannelVolume(index, volume, True)
+    # The 3rd positional argument is pickupMode, NOT useGlobalIndex
+    channels.setChannelVolume(index, volume, useGlobalIndex=True)
     return {
-        "volume": channels.getChannelVolume(index, True),
+        "volume": channels.getChannelVolume(index, useGlobalIndex=True),
         "channel_name": channels.getChannelName(index, True),
     }
 
@@ -988,7 +1016,7 @@ def handle_channels_set_pan(params: dict) -> dict:
     """Set channel pan."""
     index = params.get("index", 0)
     pan = params.get("pan", 0.0)
-    channels.setChannelPan(index, pan, True)
+    channels.setChannelPan(index, pan, useGlobalIndex=True)
     return {
         "pan": channels.getChannelPan(index, True),
         "channel_name": channels.getChannelName(index, True),

@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 def register_transport_tools(mcp: FastMCP) -> None:
     """Register transport control tools with the MCP server."""
     from fl_studio_mcp.utils.connection import get_connection
+    from fl_studio_mcp.utils.fl_trigger import fl_project_file
 
     @mcp.tool()
     def fl_play() -> str:
@@ -140,10 +141,62 @@ def register_transport_tools(mcp: FastMCP) -> None:
             return {"error": result["error"]}
 
         return {
+            "bars": result.get("bars", 0),
             "ticks": result.get("ticks", 0),
             "seconds": result.get("seconds", 0),
             "milliseconds": result.get("milliseconds", 0),
         }
+
+    @mcp.tool()
+    def fl_get_project_state() -> dict:
+        """Get the open project's file name and whether it has unsaved changes.
+
+        project_file comes from FL's window title (Windows only, else None).
+        changed: 0 = saved, 1 = unsaved changes, 2 = unsaved but covered by
+        FL's last autosave.
+        """
+        conn = get_connection()
+        result = conn.send_command("project.getState")
+        if not result.get("success", False) and "error" in result:
+            return {"error": result["error"]}
+        return {
+            "project_file": fl_project_file(),
+            "changed": result.get("changed"),
+            "unsaved_changes": result.get("unsaved_changes"),
+        }
+
+    @mcp.tool()
+    def fl_save_project(new_version: bool = False) -> str:
+        """Save the open project, like Ctrl+S (or Ctrl+N with new_version).
+
+        Changes made through these tools live only in the running FL Studio
+        until the project is saved: save after each significant step.
+        Refuses when the open file is one of FL's autosave backups, since
+        saving would write into the Backup folder: Save As a real file first.
+
+        Args:
+            new_version: True to save as a new numbered version instead of
+                overwriting the project file
+        """
+        conn = get_connection()
+        project = fl_project_file()
+        if project and "autosaved" in project.lower():
+            return (
+                f"Not saved: the open project is an autosave backup ({project}). "
+                "Ask the user to use File > Save as to a real project file first."
+            )
+
+        result = conn.send_command("project.save", {"new_version": new_version})
+        if not result.get("success", False) and "error" in result:
+            return f"Error: {result['error']}"
+        # FL saves after the command returns: confirm with separate reads
+        after = conn.read_until("project.getState", None,
+                                lambda s: s.get("changed") == 0, timeout=5.0)
+        project = fl_project_file() or "project"
+        if after.get("changed") != 0:
+            return (f"Save requested but FL still reports unsaved changes "
+                    f"({project}); a dialog may be open in FL.")
+        return f"Saved: {project}"
 
     @mcp.tool()
     def fl_set_loop_mode(mode: str) -> str:

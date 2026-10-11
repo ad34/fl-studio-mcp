@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import platform
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,9 @@ class MIDIConnection:
         self._port_name: str | None = None
         self._connected = False
         self._error: str | None = None
+        # One command/response file pair: tool calls run in parallel threads
+        # and would overwrite each other's command or read the wrong response
+        self._lock = threading.Lock()
 
         # File paths for JSON communication
         self._hardware_dir = _get_fl_hardware_dir()
@@ -168,29 +172,30 @@ class MIDIConnection:
             "params": params or {},
         }
 
-        # Write command to file
-        try:
-            self._command_file.write_text(json.dumps(command, indent=2))
-        except Exception as e:
-            return {"success": False, "error": f"Failed to write command file: {e}"}
-
-        # Clear old response file
-        if self._response_file.exists():
+        with self._lock:
+            # Write command to file
             try:
-                self._response_file.unlink()
-            except Exception:
-                pass
+                self._command_file.write_text(json.dumps(command, indent=2))
+            except Exception as e:
+                return {"success": False, "error": f"Failed to write command file: {e}"}
 
-        # Send MIDI trigger
-        try:
-            import mido
-            trigger_msg = mido.Message("note_on", note=self.TRIGGER_NOTE, velocity=127)
-            self._port.send(trigger_msg)
-        except Exception as e:
-            return {"success": False, "error": f"Failed to send MIDI trigger: {e}"}
+            # Clear old response file
+            if self._response_file.exists():
+                try:
+                    self._response_file.unlink()
+                except Exception:
+                    pass
 
-        # Wait for response
-        return self._wait_for_response(timeout)
+            # Send MIDI trigger
+            try:
+                import mido
+                trigger_msg = mido.Message("note_on", note=self.TRIGGER_NOTE, velocity=127)
+                self._port.send(trigger_msg)
+            except Exception as e:
+                return {"success": False, "error": f"Failed to send MIDI trigger: {e}"}
+
+            # Wait for response
+            return self._wait_for_response(timeout)
 
     def _wait_for_response(self, timeout: float) -> dict[str, Any]:
         """Wait for response file to appear and read it.

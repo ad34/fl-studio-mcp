@@ -54,7 +54,13 @@ https://github.com/user-attachments/assets/c2b1a5e7-1640-41fa-82bc-18ca7cbae9e8
 - Set playback position
 - Get song length and position
 - Control loop mode (pattern/song)
-- Adjust playback speed
+- Adjust playback speed and tempo
+
+### Project
+
+- **Save the project** (like Ctrl+S, or as a new version like Ctrl+N), confirmed by FL's unsaved-changes flag
+- Check which project file is open and whether it has unsaved changes
+- Refuses to save over one of FL's autosave backups
 
 ### Mixer Control
 
@@ -66,6 +72,7 @@ https://github.com/user-attachments/assets/c2b1a5e7-1640-41fa-82bc-18ca7cbae9e8
 - **Load effects** into mixer slots (any Fruity, VST or VST3 effect FL knows about)
 - Read/set each effect slot's **Mix knob (dry/wet)** and turn slots on/off
 - **Routing**: send a track to another (bus, FX return, sidechain) with a send level, or route it to one track only
+- **Level metering**: play the song and get every track's peak, average level and share of clipped samples, for gain staging
 
 ### Channel Rack Control
 
@@ -79,10 +86,16 @@ https://github.com/user-attachments/assets/c2b1a5e7-1640-41fa-82bc-18ca7cbae9e8
 ### Plugin Control
 
 - Search installed plugins (FL Studio's Plugin database)
-- List plugin parameters
-- Get/set parameter values
+- List plugin parameters, or search them by name (handy on Serum-sized plugins)
+- Get/set parameter values — every write is read back and retried until it holds, since FL sometimes ignores one
 - Navigate presets (next/previous)
 - Query plugin info
+
+### Patterns & Playlist
+
+- Create, select and read the current pattern (the one piano roll edits go to)
+- Add and list playlist markers to lay out song sections
+- Read, rename and recolor playlist tracks
 
 ### Piano Roll Control
 
@@ -91,6 +104,7 @@ https://github.com/user-attachments/assets/c2b1a5e7-1640-41fa-82bc-18ca7cbae9e8
 - **Delete specific notes** by MIDI number and time
 - **Clear all notes** from the piano roll
 - **Read piano roll state** to see all existing notes
+- Open the piano roll on a given channel
 - Auto-triggering via keystroke (Cmd+Opt+Y on macOS, Ctrl+Alt+Y on Windows)
 
 ---
@@ -99,7 +113,13 @@ https://github.com/user-attachments/assets/c2b1a5e7-1640-41fa-82bc-18ca7cbae9e8
 
 > **Cannot load instruments** — Effects can be loaded into mixer slots (`fl_load_effect`), but FL Studio's scripting API has no way to add a generator to the Channel Rack. Instruments have to be loaded by hand; after that their parameters can be controlled. Effect loading goes through the call FL's own Mackie script uses to drop Edison on a track, and needs the Plugin database on the same drive as FL Studio.
 
-> **No pattern management (yet)** — The server can write notes and step-sequencer steps into a pattern, but it has no tools to create, switch, rename, or clone patterns. Everything goes into whichever pattern is currently selected in FL Studio, so pick or create the pattern yourself before asking for notes. (FL Studio's scripting API does support this through the `patterns` module, so it could be added.)
+> **Limited pattern management** — Patterns can be created (optionally named), selected and read (`fl_create_pattern`, `fl_select_pattern`, `fl_get_current_pattern`), and notes go into the selected one. Renaming an existing pattern, cloning and deleting aren't available yet.
+
+> **No playlist clips** — FL Studio's scripting API can't place or read clips in the playlist. Lay out sections with markers (`fl_add_markers`) and drag the patterns in yourself. Markers expose their names only: they can't be moved or deleted through the API.
+
+> **Save your work** — Every change made through these tools lives only in the running FL Studio until the project is saved. Save often (`fl_save_project`): if FL crashes, only its autosaves (the project's `Backup` folder) are left.
+
+> **Driven parameters** — A plugin parameter linked to an automation clip or a controller (e.g. a Fruity peak controller) is set again by FL during playback, so a value written through the API won't last. Use the slot's Mix knob (`fl_set_fx_mix`) for those.
 
 ---
 
@@ -291,6 +311,14 @@ fl-studio-mcp
 | `fl_get_song_length` | Get song duration |
 | `fl_set_loop_mode` | Switch between pattern/song mode |
 | `fl_set_playback_speed` | Adjust playback speed (0.25x–4x) |
+| `fl_set_tempo` | Set the project tempo |
+
+### Project
+
+| Tool | Description |
+|------|-------------|
+| `fl_get_project_state` | Open project file (from FL's window title, Windows only) and unsaved-changes flag |
+| `fl_save_project` | Save the project, or save it as a new version; refuses on an autosave backup |
 
 ### Mixer
 
@@ -313,6 +341,7 @@ fl-studio-mcp
 | `fl_set_fx_enabled` | Turn an effect slot on or off |
 | `fl_get_track_routing` | Show where a track sends to (with levels) and what feeds into it |
 | `fl_route_track` | Create/remove a route between two tracks, set its send level |
+| `fl_measure_levels` | Play from a bar and report each track's peak, average level and clipping |
 
 ### Channels
 
@@ -345,18 +374,32 @@ fl-studio-mcp
 | `fl_is_plugin_valid` | Check if plugin exists |
 | `fl_get_plugin_name` | Get plugin name |
 | `fl_get_plugin_param_count` | Get parameter count |
-| `fl_get_plugin_params` | List all parameters |
+| `fl_get_plugin_params` | List parameters (paged), with a mixer slot's Mix knob first |
+| `fl_find_plugin_params` | Search parameters by name |
 | `fl_get_plugin_param_value` | Get parameter value |
-| `fl_set_plugin_param_value` | Set parameter value |
+| `fl_set_plugin_param_value` | Set parameter value, read back and retried until it holds |
 | `fl_get_preset_count` | Get preset count |
 | `fl_next_preset` | Next preset |
 | `fl_prev_preset` | Previous preset |
 | `fl_get_plugin_color` | Get plugin color |
 
+### Patterns & Playlist
+
+| Tool | Description |
+|------|-------------|
+| `fl_get_current_pattern` | Get the selected pattern (the one piano roll edits go to) |
+| `fl_select_pattern` | Select a pattern |
+| `fl_create_pattern` | Create a new pattern and select it |
+| `fl_get_markers` | List playlist marker names, in timeline order |
+| `fl_add_markers` | Add playlist markers (existing names are skipped) |
+| `fl_get_playlist_tracks` | Get playlist track names and colors |
+| `fl_set_playlist_track` | Rename and/or recolor a playlist track |
+
 ### Piano Roll
 
 | Tool | Description |
 |------|-------------|
+| `fl_open_piano_roll` | Open the piano roll on a channel |
 | `fl_send_notes` | Add notes to the piano roll |
 | `fl_send_chord` | Add a chord (multiple notes at same time) |
 | `fl_delete_notes` | Delete specific notes |
@@ -380,6 +423,18 @@ fl-studio-mcp
 
 ```text
 "Load Fruity Reeverb 2 on mixer track 10, name it Reverb Bus, and send tracks 2 and 3 to it at -6 dB"
+```
+
+### Gain Staging a Whole Song
+
+```text
+"Measure the levels of the whole song, find what clips the master, fix the balance, then save the project"
+```
+
+### Laying Out a Song
+
+```text
+"Create a pattern called Drop and add playlist markers Intro, Build, Drop, Break, Outro"
 ```
 
 ### Creating a Drum Pattern
@@ -432,6 +487,15 @@ fl-studio-mcp
 4. Try pressing Cmd+Opt+Y (macOS) or Ctrl+Alt+Y (Windows) manually to confirm the hotkey is bound to the script in FL Studio
 5. If you just updated the server code (e.g. pulled a fix), **fully restart** your MCP client (Claude Desktop/Code) — reconnecting the MCP server alone does not respawn the underlying process
 
+### A plugin parameter won't change, or changes back
+
+1. `fl_set_plugin_param_value` reads the value back and writes again until it holds; if it still reports the old value, the parameter is probably driven by an automation clip or a controller link
+2. Driven parameters are rewritten by FL during playback: set the slot's Mix knob with `fl_set_fx_mix` instead
+
+### A new or updated tool says "Unknown action"
+
+The controller script inside FL Studio is older than the server. Copy `fl_controller/device_FLStudioMCP.py` to FL Studio's `Settings/Hardware/FLStudioMCP` folder again, then reload it: **View > Script output**, pick the FLStudioMCP port's tab, click **Reload script** (or restart FL Studio).
+
 ### No MIDI ports available
 
 - **macOS**: Enable IAC Driver in Audio MIDI Setup
@@ -467,11 +531,13 @@ This MCP server uses a hybrid approach:
 
 ### How It Works
 
-**Transport / Mixer / Channels / Plugins:**
+**Transport / Mixer / Channels / Plugins / Patterns / Playlist:**
 1. MCP server writes command to JSON file
 2. Sends MIDI trigger note to FL Studio
 3. FL Studio controller script reads JSON, executes API, writes response
 4. MCP server reads response
+
+There is a single command/response file pair, so the server runs one command at a time even when a client calls several tools in parallel. FL applies some changes (slot mix, loop mode, volume...) only after the command that made them returns: tools that need the new state confirm it with separate reads.
 
 **Piano Roll:**
 1. MCP server writes note requests to JSON file
@@ -522,12 +588,13 @@ fl-studio-mcp/
 │   ├── tools/                    # MCP tool implementations
 │   │   ├── channels.py
 │   │   ├── mixer.py
-│   │   ├── piano_roll.py
+│   │   ├── piano_roll.py         # Piano roll notes and patterns
+│   │   ├── playlist.py           # Markers and playlist tracks
 │   │   ├── plugins.py
-│   │   └── transport.py
+│   │   └── transport.py          # Transport and project save
 │   └── utils/
 │       ├── connection.py         # FL Studio connection wrapper
-│       ├── fl_trigger.py         # Piano roll keystroke trigger
+│       ├── fl_trigger.py         # Piano roll keystroke trigger, FL window lookup
 │       └── midi_connection.py    # MIDI + JSON communication layer
 ├── install.sh                    # One-command installer (macOS/Linux)
 └── install.ps1                   # One-command installer (Windows)

@@ -274,6 +274,14 @@ def dispatch_command(action: str, params: dict) -> dict:
         return handle_channels_set_color(params)
     elif action == "channels.routeToMixer":
         return handle_channels_route_to_mixer(params)
+    elif action == "channels.addFromPreset":
+        return handle_channels_add_from_preset(params)
+    elif action == "channels.showEditor":
+        return handle_channels_show_editor(params)
+    elif action == "ui.closeEmptySlotWindow":
+        return handle_ui_close_empty_slot_window(params)
+    elif action == "system.getPaths":
+        return handle_system_get_paths()
 
     # Step sequencer commands
     elif action == "channels.getGridBit":
@@ -671,20 +679,23 @@ def _selection():
             "start_bar": _bar_of(start), "end_bar": _bar_of(end)}
 
 
-def _marker_sections() -> dict:
-    """Start and end ticks of each marker (by index), read in song mode.
+def _marker_sections() -> tuple:
+    """Start and end ticks of each marker (by index), read in song mode, and
+    the playhead position (ticks) from before the scan.
 
     FL only gives marker names, but jumping to a marker selects its section,
     up to the next marker (no end for the last one). A marker sharing its
-    position with another one is never landed on, so it is missing.
+    position with another one is never landed on, so it is missing. The
+    playhead is moved back here, but that doesn't stick when a selection is
+    restored in the same callback: callers move it again in a new command.
     """
+    position = transport.getSongPos(midi.SONGLENGTH_ABSTICKS)
     count = len(_marker_names())
     if not count:
-        return {}
+        return {}, position
     _check_selection_api()
     if transport.getLoopMode() != 1:
         raise ValueError("Marker positions can only be read in song mode")
-    position = transport.getSongPos(midi.SONGLENGTH_ABSTICKS)
     selection = _selection()
 
     sections = {}
@@ -697,12 +708,14 @@ def _marker_sections() -> dict:
             end = arrangement.selectionEnd()
             sections[index] = (arrangement.selectionStart(), end if end >= 0 else None)
     finally:
+        # The last jump leaves its marker section looping inside FL, and only
+        # selectionClear ends that: selectionSet alone would keep positions
+        # wrapping inside that section
+        arrangement.selectionClear()
         if selection:
             arrangement.selectionSet(selection["start_tick"], selection["end_tick"])
-        else:
-            arrangement.selectionClear()
         transport.setSongPos(position, midi.SONGLENGTH_ABSTICKS)
-    return sections
+    return sections, position
 
 
 def handle_arrangement_get_markers() -> dict:
@@ -712,7 +725,7 @@ def handle_arrangement_get_markers() -> dict:
 
 def handle_arrangement_get_marker_sections() -> dict:
     """Name, start and end (the next marker's position) of every marker."""
-    sections = _marker_sections()
+    sections, position = _marker_sections()
     markers = []
     for index, name in enumerate(_marker_names()):
         start, end = sections.get(index, (None, None))
@@ -724,13 +737,15 @@ def handle_arrangement_get_marker_sections() -> dict:
             "start_tick": start,
             "end_tick": end,
         })
-    return {"markers": markers}
+    return {"markers": markers, "restore_position": position}
 
 
 def handle_arrangement_set_selection(params: dict) -> dict:
-    """Select a section and move the playhead to its start (song mode only).
+    """Select a section (song mode only).
 
-    Takes start_tick/end_tick, or start_bar/end_bar (end exclusive).
+    Takes start_tick/end_tick, or start_bar/end_bar (end exclusive). Move the
+    playhead with a separate transport.setPosition: setSongPos in the same
+    callback as selectionSet doesn't stick.
     """
     _check_selection_api()
     if transport.getLoopMode() != 1:
@@ -745,9 +760,8 @@ def handle_arrangement_set_selection(params: dict) -> dict:
         end = round((end_bar - 1) * _ticks_per_bar())
     if start < 0 or end <= start:
         raise ValueError("The section must end after it starts")
+    arrangement.selectionClear()  # also ends a marker section loop
     arrangement.selectionSet(start, end)
-    if params.get("move_playhead", True):
-        transport.setSongPos(start, midi.SONGLENGTH_ABSTICKS)
     return {"selection": _selection()}
 
 
@@ -756,6 +770,20 @@ def handle_arrangement_clear_selection() -> dict:
     _check_selection_api()
     arrangement.selectionClear()
     return {"cleared": True}
+
+
+def _dropped_marker(before: list, after: list):
+    """Index in `before` of the one marker missing from `after`, or None.
+
+    Compares positions rather than names: projects can have several markers
+    with the same name.
+    """
+    if len(after) != len(before) - 1:
+        return None
+    for index, name in enumerate(after):
+        if before[index] != name:
+            return index
+    return len(after)
 
 
 def handle_arrangement_add_markers(params: dict) -> dict:
@@ -776,16 +804,18 @@ def handle_arrangement_add_markers(params: dict) -> dict:
         tick = round((bar - 1) * ticks_per_bar)
         arrangement.addAutoTimeMarker(tick, name)
         after = _marker_names()
-        if name not in after:
-            # FL toggles markers: at a position that already has one, adding
-            # removes that marker instead. Put it back and report the clash.
-            removed = [n for n in existing if n not in after]
-            if removed:
-                arrangement.addAutoTimeMarker(tick, removed[0])
-                after = _marker_names()
-            occupied.append({"name": name, "bar": bar, "taken_by": removed[0] if removed else None})
-        else:
+        if len(after) == len(existing) + 1:
             added.append(name)
+        else:
+            # FL toggles markers: at a position that already has one, adding
+            # removes that marker instead. Put it back (FL records both steps
+            # in the undo history) and report the clash.
+            dropped = _dropped_marker(existing, after)
+            taken_by = None if dropped is None else existing[dropped]
+            if taken_by is not None:
+                arrangement.addAutoTimeMarker(tick, taken_by)
+                after = _marker_names()
+            occupied.append({"name": name, "bar": bar, "taken_by": taken_by})
         existing = after
     return {"added": added, "skipped": skipped, "occupied": occupied}
 
@@ -796,14 +826,21 @@ def handle_arrangement_delete_marker(params: dict) -> dict:
     names = _marker_names()
     if name not in names:
         raise ValueError(f"No marker named '{name}'")
-    start = _marker_sections().get(names.index(name), (None, None))[0]
+    sections, position = _marker_sections()
+    start = sections.get(names.index(name), (None, None))[0]
     if start is None:
         raise ValueError(f"FL can't locate marker '{name}'")
     # Adding a marker where one already is removes that marker instead
     arrangement.addAutoTimeMarker(start, name)
-    if name in _marker_names():
+    dropped = _dropped_marker(names, _marker_names())
+    if dropped is None:
         raise ValueError(f"FL Studio did not delete marker '{name}'")
-    return {"deleted": name, "bar": _bar_of(start)}
+    if names[dropped] != name:
+        # Another marker at the same position went instead: put it back
+        arrangement.addAutoTimeMarker(start, names[dropped])
+        raise ValueError(f"FL Studio removed '{names[dropped]}' instead of '{name}' "
+                         f"(same position); it was put back")
+    return {"deleted": name, "bar": _bar_of(start), "restore_position": position}
 
 
 def _check_playlist_track(index: int) -> None:
@@ -1414,6 +1451,102 @@ def handle_channels_set_color(params: dict) -> dict:
     color = (r << 16) | (g << 8) | b
     channels.setChannelColor(index, color, True)
     return {"color": f"RGB({r}, {g}, {b})"}
+
+
+def handle_system_get_paths() -> dict:
+    """FL's Data/System folder (channel templates) and this script's folder."""
+    return {"data_system": _fl_data_system_dir(), "script_dir": str(SCRIPT_DIR)}
+
+
+def _free_mixer_track() -> int:
+    """First insert track with its default name, no effect, and nothing routed to it.
+
+    Neither a channel nor another track (a bus) may send to it.
+    """
+    used = {channels.getTargetFxTrack(i, True) for i in range(channels.channelCount(True))}
+    inserts = range(1, mixer.trackCount() - 1)
+    for track in inserts:
+        name = mixer.getTrackName(track)
+        if (track not in used and name in ("", f"Insert {track}")
+                and not any(mixer.isTrackPluginValid(track, s) for s in range(MIXER_SLOT_COUNT))
+                and not any(mixer.getRouteSendActive(src, track)
+                            for src in inserts if src != track)):
+            return track
+    raise ValueError("No free mixer track: give one")
+
+
+def handle_ui_close_empty_slot_window(params: dict) -> dict:
+    """Close the empty "Slot 1 (<track>)" window that adding a channel opens.
+
+    Only when it is the focused window and its slot is really empty.
+    """
+    track = params.get("mixer_track", 0)
+    _check_track(track)
+    caption = ui.getFocusedFormCaption()
+    # The caption has the track's name, which FL set to the new channel's
+    # name (the bridge may have restored a custom one since)
+    names = {mixer.getTrackName(track), params.get("channel_name", "")} - {""}
+    empty_slot_focused = (
+        ui.getFocused(midi.widPluginEffect)
+        and caption.startswith("Slot ")
+        and any(f"({name})" in caption for name in names)
+        and not any(mixer.isTrackPluginValid(track, s) for s in range(MIXER_SLOT_COUNT))
+    )
+    if empty_slot_focused:
+        ui.escape()
+    return {"closed": bool(empty_slot_focused)}
+
+
+def handle_channels_show_editor(params: dict) -> dict:
+    """Show (True), hide (False) or toggle (None) a channel's plugin window."""
+    index = params.get("index", 0)
+    show = params.get("show")
+    channels.showEditor(index, -1 if show is None else int(show), True)
+    return {"index": index}
+
+
+def handle_channels_add_from_preset(params: dict) -> dict:
+    """Add a channel from a channel preset next to this script.
+
+    The server writes the preset (a plugin from the Plugin database, or FL's
+    SamplerTrack.fst template with a sample in it), named as the channel
+    should be: FL's Python fails at writing binary files.
+    """
+    preset = params.get("preset", "")
+    if os.path.basename(preset) != preset or not preset.endswith(".fst"):
+        raise ValueError("preset must be a .fst file name in the script folder")
+    track = params.get("mixer_track")
+    if track is None:
+        track = _free_mixer_track()
+    elif track < 1:
+        raise ValueError("Route the channel to an insert track (1 or more), not the master")
+    _check_track(track)
+    track_name = mixer.getTrackName(track)
+    custom_track_name = track_name not in ("", f"Insert {track}")
+
+    # The scripting API can't add channels, but the audio editor launcher
+    # creates one from a generator preset, routed to the track. FL names the
+    # channel after the preset file. It only takes paths relative to FL's
+    # Data/System folder.
+    try:
+        relative = os.path.relpath(str(SCRIPT_DIR / preset), _fl_data_system_dir())
+    except ValueError:
+        raise ValueError("FL Studio's settings folder must be on FL Studio's drive") from None
+    before = [channels.getChannelName(i, True) for i in range(channels.channelCount(True))]
+    ui.launchAudioEditor(False, "", track, relative, "")
+    after = [channels.getChannelName(i, True) for i in range(channels.channelCount(True))]
+    if len(after) != len(before) + 1:
+        raise ValueError("FL Studio did not add the channel")
+    index = next((i for i, n in enumerate(before) if after[i] != n), len(before))
+    if custom_track_name:
+        # FL renames the track after the channel: keep the user's name
+        mixer.setTrackName(track, track_name)
+    return {
+        "channel": index,
+        "name": channels.getChannelName(index, True),
+        "mixer_track": track,
+        "mixer_track_name": mixer.getTrackName(track),
+    }
 
 
 def handle_channels_route_to_mixer(params: dict) -> dict:

@@ -50,6 +50,8 @@ def register_mixer_tools(mcp: FastMCP) -> None:
         import math
         import time
 
+        if start_bar < 1:
+            return {"error": "start_bar starts at 1"}
         conn = get_connection()
         seconds = min(max(seconds, 1.0), 120.0)
         interval = max(interval, 0.05)
@@ -67,20 +69,21 @@ def register_mixer_tools(mcp: FastMCP) -> None:
         selection = status.get("selection")
         if selection:
             conn.send_command("arrangement.clearSelection")
-        for _ in range(5):
-            result = conn.send_command("transport.setPosition", {"bar": start_bar})
-            if not result.get("success", False) and "error" in result:
-                return {"error": result["error"]}
-            at_start = conn.read_until(
-                "transport.getStatus", None,
-                lambda s: str(s.get("position", "")).startswith(f"{start_bar}:"),
-                timeout=0.5)
-            if str(at_start.get("position", "")).startswith(f"{start_bar}:"):
-                break
 
         samples: list[list[float]] = []
-        conn.send_command("transport.start")
         try:
+            for _ in range(5):
+                result = conn.send_command("transport.setPosition", {"bar": start_bar})
+                if not result.get("success", False) and "error" in result:
+                    return {"error": result["error"]}
+                at_start = conn.read_until(
+                    "transport.getStatus", None,
+                    lambda s: str(s.get("position", "")).startswith(f"{start_bar}:"),
+                    timeout=0.5)
+                if str(at_start.get("position", "")).startswith(f"{start_bar}:"):
+                    break
+
+            conn.send_command("transport.start")
             end = time.monotonic() + seconds
             while time.monotonic() < end:
                 peaks = conn.send_command("mixer.getPeaks").get("peaks")
@@ -93,8 +96,7 @@ def register_mixer_tools(mcp: FastMCP) -> None:
             conn.send_command("transport.stop")
             if selection:
                 conn.send_command("arrangement.setSelection", {
-                    "start_tick": selection["start_tick"], "end_tick": selection["end_tick"],
-                    "move_playhead": False})
+                    "start_tick": selection["start_tick"], "end_tick": selection["end_tick"]})
             if status.get("loop_mode") != "song":
                 previous = status.get("loop_mode", "pattern")
                 conn.send_command("transport.setLoopMode", {"mode": previous})

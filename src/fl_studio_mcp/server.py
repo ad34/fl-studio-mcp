@@ -12,7 +12,8 @@ Requirements:
 - For piano roll: ComposeWithLLM.pyscript installed in FL Studio
 
 Limitations:
-- Can load effects into mixer slots, but not instruments into the channel rack
+- Can load effects into mixer slots, and instruments and samples into new
+  channels
 - Cannot place clips in the playlist or delete patterns
 """
 
@@ -26,6 +27,7 @@ from fl_studio_mcp.tools import (
     register_piano_roll_tools,
     register_playlist_tools,
     register_plugin_tools,
+    register_sample_tools,
     register_transport_tools,
 )
 from fl_studio_mcp.utils.connection import get_connection, reset_connection
@@ -45,7 +47,10 @@ Available tool categories:
 - Mixer: Volume, pan, stereo separation, mute, solo, track management,
   effect slots (load, mix/dry-wet, bypass), routing and send levels
 - Channels: Channel info, note triggering, step sequencer
-- Plugins: Parameter control, preset navigation, plugin search
+- Samples: search the browser's sample folders (fl_find_samples) and load a
+  sample into a new Sampler channel (fl_load_sample)
+- Plugins: Parameter control, preset navigation, plugin search, loading
+  instruments into new channels (fl_load_instrument)
 - Patterns: list, create, select, rename, recolor, resize, clone (piano roll
   edits go to the selected one)
 - Playlist: markers (with their bars; add, delete), track names, colors,
@@ -61,8 +66,9 @@ effect and is not a plugin parameter. Check it (fl_get_track_fx or
 fl_get_mixer_track_info) before judging how strong an effect is.
 
 Important limitations:
-1. Effects can be loaded into mixer slots (fl_load_effect), but instruments
-   can't be added to the channel rack - only existing ones can be controlled
+1. Effects can be loaded into mixer slots (fl_load_effect), instruments
+   (fl_load_instrument) and samples (fl_load_sample) into new channels; a
+   sample can't be swapped in an existing channel
 2. Clips can't be placed or read in the playlist (no API, still the case in
    FL Studio 2026): lay out sections with markers (fl_add_markers), name and
    color the patterns, and let the user drag them onto the playlist
@@ -160,6 +166,7 @@ register_channel_tools(mcp)
 register_plugin_tools(mcp)
 register_piano_roll_tools(mcp)
 register_playlist_tools(mcp)
+register_sample_tools(mcp)
 
 
 def main():

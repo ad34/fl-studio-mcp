@@ -25,6 +25,34 @@ def register_playlist_tools(mcp: FastMCP) -> None:
                                  lambda s: s.get("loop_mode") == mode)
         return status.get("loop_mode") == mode
 
+    def _run_in_song_mode(conn, action: str, params: dict | None = None) -> dict:
+        """Run a bridge action that needs song mode (it jumps between markers),
+        then put the playhead and the loop mode back. Refuses during playback."""
+        status = conn.send_command("transport.getStatus")
+        if not status.get("success", False) and "error" in status:
+            return {"error": status["error"]}
+        if status.get("is_playing"):
+            return {"error": "stop playback first"}
+        previous = status.get("loop_mode")
+        if previous != "song" and not _set_mode(conn, "song"):
+            return {"error": "could not switch FL Studio to song mode"}
+        result = conn.send_command(action, params)
+        selection = status.get("selection")
+        if selection:
+            # After a scan the bridge restores the selection, but FL can keep
+            # looping the last marker section: set it again in new commands
+            conn.send_command("arrangement.clearSelection")
+            conn.send_command("arrangement.setSelection", {
+                "start_tick": selection["start_tick"], "end_tick": selection["end_tick"]})
+        if result.get("restore_position") is not None:
+            # Moving the playhead back in the command that restored the time
+            # selection doesn't stick
+            conn.send_command("transport.setPosition",
+                              {"position": result["restore_position"], "mode": 2})
+        if previous != "song" and not _set_mode(conn, previous):
+            result["warning"] = f"FL was left in song mode (it was in {previous} mode)"
+        return result
+
     def _marker_names(conn) -> list | dict:
         result = conn.send_command("arrangement.getMarkers")
         if not result.get("success", False) and "error" in result:
@@ -40,27 +68,22 @@ def register_playlist_tools(mcp: FastMCP) -> None:
         section runs from its bar up to end_bar, the next marker's bar (None
         for the last one). Bars count from 1, follow the project's time
         signature and can be fractional. bar is None when FL can't locate the
-        marker (two markers at the same position). Reading positions briefly
-        switches FL to song mode and moves the playhead, then puts both back;
-        while FL is playing, only the names are returned.
+        marker (two markers at the same position, placed by hand). Reading
+        positions briefly switches FL to song mode and moves the playhead,
+        then puts both back; while FL is playing, only the names are returned.
         """
         conn = get_connection()
         names = _marker_names(conn)
         if isinstance(names, dict) or not names:
             return names if isinstance(names, dict) else {"markers": []}
-        status = conn.send_command("transport.getStatus")
-        if status.get("is_playing") or status.get("is_recording"):
-            return {"markers": names, "note": "Stop playback to read marker positions"}
-        previous = status.get("loop_mode")
-        if previous != "song" and not _set_mode(conn, "song"):
-            return {"markers": names, "note": "Could not switch to song mode to read positions"}
-        result = conn.send_command("arrangement.getMarkerSections")
-        if previous == "pattern":
-            _set_mode(conn, "pattern")
+        result = _run_in_song_mode(conn, "arrangement.getMarkerSections")
         if not result.get("success", False) and "error" in result:
             return {"markers": names, "note": f"Positions unavailable: {result['error']}"}
-        return {"markers": [{k: m[k] for k in ("index", "name", "bar", "end_bar")}
-                            for m in result.get("markers", [])]}
+        markers = {"markers": [{k: m[k] for k in ("index", "name", "bar", "end_bar")}
+                               for m in result.get("markers", [])]}
+        if result.get("warning"):
+            markers["warning"] = result["warning"]
+        return markers
 
     @mcp.tool()
     def fl_loop_section(
@@ -99,8 +122,8 @@ def register_playlist_tools(mcp: FastMCP) -> None:
             return "Error: could not switch FL Studio to song mode"
 
         def fail(message: str) -> str:
-            if previous == "pattern":
-                _set_mode(conn, "pattern")
+            if previous != "song" and not _set_mode(conn, previous):
+                message += f" (and FL was left in song mode; it was in {previous} mode)"
             return f"Error: {message}"
 
         ticks_per_bar = status.get("ticks_per_bar") or 384
@@ -149,28 +172,23 @@ def register_playlist_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     def fl_delete_marker(name: str) -> str:
-        """Delete a playlist marker by name.
+        """Delete a playlist marker by name (needs FL Studio 2025 or later).
 
-        Briefly switches FL to song mode to locate it, then puts the mode back.
+        Briefly switches FL to song mode to locate it, then puts the mode and
+        the playhead back. The deletion is an undo entry: fl_undo right after
+        brings the marker back. With several markers of the same name, the
+        first one is deleted.
 
         Args:
             name: Marker name, as listed by fl_get_markers
         """
-        conn = get_connection()
-        status = conn.send_command("transport.getStatus")
-        if not status.get("success", False) and "error" in status:
-            return f"Error: {status['error']}"
-        if status.get("is_playing") or status.get("is_recording"):
-            return "Error: stop playback first"
-        previous = status.get("loop_mode")
-        if previous != "song" and not _set_mode(conn, "song"):
-            return "Error: could not switch FL Studio to song mode"
-        result = conn.send_command("arrangement.deleteMarker", {"name": name})
-        if previous == "pattern":
-            _set_mode(conn, "pattern")
+        result = _run_in_song_mode(get_connection(), "arrangement.deleteMarker", {"name": name})
         if not result.get("success", False) and "error" in result:
             return f"Error: {result['error']}"
-        return f"Marker '{name}' at bar {result.get('bar')} deleted"
+        text = f"Marker '{name}' at bar {result.get('bar')} deleted"
+        if result.get("warning"):
+            text += f". Warning: {result['warning']}"
+        return text
 
     @mcp.tool()
     def fl_add_markers(markers: list[dict], beats_per_bar: int | None = None) -> str:
@@ -179,7 +197,10 @@ def register_playlist_tools(mcp: FastMCP) -> None:
         A marker whose name already exists is skipped, so re-running the same
         call adds nothing; so is one at a position that already has a marker.
         Markers can't be moved: delete one (fl_delete_marker) and add it
-        again. Each added marker is an undo entry.
+        again. Each added marker is an undo entry. A position clash leaves the
+        existing marker in place but adds two undo entries (FL removes it and
+        it is put back), so revert with fl_save_undo_point and
+        fl_undo(to_save_point=True) rather than by counting steps.
 
         Args:
             markers: List of {"bar": int, "name": str}; bars are numbered from 1
@@ -199,7 +220,8 @@ def register_playlist_tools(mcp: FastMCP) -> None:
             text += f". Already present, skipped: {', '.join(skipped)}"
         for clash in result.get("occupied", []):
             taken_by = f" by '{clash['taken_by']}'" if clash.get("taken_by") else ""
-            text += f". Bar {clash['bar']} is already taken{taken_by}: '{clash['name']}' not added"
+            text += (f". Bar {clash['bar']} is already taken{taken_by}: '{clash['name']}' "
+                     f"not added (2 undo entries)")
         return text
 
     @mcp.tool()

@@ -1,8 +1,7 @@
 """Plugin control tools for FL Studio.
 
-Effects can be loaded into mixer slots from FL Studio's Plugin database.
-Instruments (channel rack generators) can't be loaded: the scripting API has
-no way to add them, so these tools only control generators already loaded.
+Effects can be loaded into mixer slots, and instruments into new channels,
+from FL Studio's Plugin database.
 """
 
 from __future__ import annotations
@@ -15,6 +14,7 @@ if TYPE_CHECKING:
 
 def register_plugin_tools(mcp: FastMCP) -> None:
     """Register plugin control tools with the MCP server."""
+    from fl_studio_mcp.utils import channel_presets
     from fl_studio_mcp.utils.connection import get_connection
     from fl_studio_mcp.utils.plugin_database import find_plugins
 
@@ -77,6 +77,55 @@ def register_plugin_tools(mcp: FastMCP) -> None:
             "track": result.get("track", track),
             "track_name": result.get("track_name", ""),
             "loaded": result.get("loaded", []),
+        }
+
+    @mcp.tool()
+    def fl_load_instrument(
+        name: str,
+        channel_name: str | None = None,
+        mixer_track: int | None = None,
+        color: str | None = None,
+    ) -> dict:
+        """Add an instrument (generator) plugin to the channel rack as a new channel.
+
+        Works with any instrument FL Studio knows about: its own (3x Osc, FLEX,
+        Sytrus, FPC...) and VST/VST3 ones (Serum 2...). The channel is routed
+        to a mixer track, which FL names after the channel: the first free
+        insert track by default. Both get a color. Each call adds a channel.
+
+        Args:
+            name: Instrument name as listed by fl_find_plugins(kind="generator")
+            channel_name: Name for the new channel (default: the plugin's name)
+            mixer_track: Insert track to route the channel to (default: first free one)
+            color: "#RRGGBB" for the channel and its mixer track (default: next
+                color of a palette)
+        """
+        matches = find_plugins(name, "generator")
+        if not matches:
+            return {"error": f"No installed instrument matches '{name}'. Use fl_find_plugins."}
+        exact = [entry for entry in matches if entry.name.lower() == name.lower().strip()]
+        if not exact and len(matches) > 1:
+            return {
+                "error": f"'{name}' matches several instruments, use the exact name",
+                "candidates": [entry.name for entry in matches[:15]],
+            }
+        plugin = (exact or matches)[0]
+        try:
+            preset_data = plugin.path.read_bytes()
+        except OSError as e:
+            return {"error": f"Can't read the plugin's preset {plugin.path}: {e}"}
+
+        result = channel_presets.add_channel(
+            get_connection(), preset_data, channel_name or plugin.name, mixer_track, color)
+        if not result.get("success", False) and "error" in result:
+            return {"error": result["error"]}
+        return {
+            "channel": result.get("channel"),
+            "name": result.get("name"),
+            "plugin": plugin.name,
+            "mixer_track": result.get("mixer_track"),
+            "mixer_track_name": result.get("mixer_track_name"),
+            "color": result.get("color"),
         }
 
     @mcp.tool()

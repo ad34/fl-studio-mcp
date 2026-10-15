@@ -69,7 +69,8 @@ def register_transport_tools(mcp: FastMCP) -> None:
         Returns whether FL Studio is playing or recording, the position
         (bar:step:tick), the loop mode, the tempo, the bar length in ticks
         (from the time signature) and the playlist time selection, if any
-        ({"start_bar", "end_bar", ...}; song playback stays inside it).
+        ({"start_bar", "end_bar", ...}, end_bar excluded; song playback stays
+        inside it).
         """
         conn = get_connection()
         result = conn.send_command("transport.getStatus")
@@ -147,7 +148,7 @@ def register_transport_tools(mcp: FastMCP) -> None:
         selection = status.get("selection")
         if selection:
             text += (f"; a time selection (bars {selection['start_bar']} to "
-                     f"{selection['end_bar']}) keeps the playhead inside it")
+                     f"{selection['end_bar']}, end excluded) keeps the playhead inside it")
         return text
 
     @mcp.tool()

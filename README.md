@@ -34,6 +34,12 @@
 
 This is a fork of [karl-andres/fl-studio-mcp](https://github.com/karl-andres/fl-studio-mcp), tested on FL Studio 2026 (scripting API 45) on Windows. It adds:
 
+**Instruments & samples**
+- Load any instrument from FL's Plugin database (Serum 2, 3x Osc, FLEX...) into a new channel, routed to a free mixer track, with its window open (`fl_load_instrument`)
+- Search the browser's sample folders through FL's own index, instantly even over 100k files (`fl_find_samples`, `fl_list_sample_folders`)
+- Load a sample into a new Sampler channel, routed to a free mixer track (`fl_load_sample`)
+- New channels and their mixer tracks get a color, from a palette or the one you give
+
 **Mixer**
 - Effect slots: read and set each slot's Mix (dry/wet) knob, turn slots on or off (`fl_get_track_fx`, `fl_set_fx_mix`, `fl_set_fx_enabled`)
 - Load any effect from FL's Plugin database into a mixer slot (`fl_find_plugins`, `fl_load_effect`)
@@ -117,12 +123,15 @@ https://github.com/user-attachments/assets/c2b1a5e7-1640-41fa-82bc-18ca7cbae9e8
 - Get/set channel properties (volume, pan, name, color)
 - Mute/solo channels
 - Route channels to mixer tracks
+- **Load instruments**: any generator from FL's Plugin database into a new channel, on its own colored mixer track
+- **Load samples**: search the browser's sample folders and load a file into a new Sampler channel
 - Trigger MIDI notes in real-time
 - Step sequencer control (get/set grid bits)
 
 ### Plugin Control
 
 - Search installed plugins (FL Studio's Plugin database)
+- Load instruments into new channels, with their window open
 - List plugin parameters, or search them by name (handy on Serum-sized plugins)
 - Get/set parameter values — every write is read back and retried until it holds, since FL sometimes ignores one
 - Navigate presets (next/previous)
@@ -149,13 +158,13 @@ https://github.com/user-attachments/assets/c2b1a5e7-1640-41fa-82bc-18ca7cbae9e8
 
 ## Limitations
 
-> **Cannot load instruments** — Effects can be loaded into mixer slots (`fl_load_effect`), but FL Studio's scripting API has no way to add a generator to the Channel Rack. Instruments have to be loaded by hand; after that their parameters can be controlled. Effect loading goes through the call FL's own Mackie script uses to drop Edison on a track, and needs the Plugin database on the same drive as FL Studio.
+> **Channels can be added, not changed** — Effects can be loaded into mixer slots (`fl_load_effect`), and instruments and samples into new channels (`fl_load_instrument`, `fl_load_sample`), each routed to the mixer track you give or the first free one (default name, no effect, nothing routed to it). FL Studio's scripting API has no way to load a sample into an existing channel, swap a channel's instrument or remove a channel. New channels go through FL's own channel preset loading, which needs your Documents folder (where the bridge script lives) on the same drive as FL Studio; the samples can be on any drive. Sample paths must be shorter than 260 characters and use Western characters (FL's Sampler presets store them as ANSI). The sample folders come from FL's Windows settings, so the sample search works on Windows only. Effect loading goes through the call FL's own Mackie script uses to drop Edison on a track, and needs the Plugin database on the same drive as FL Studio.
 
 > **No pattern deletion** — Patterns can be listed, created, selected, renamed, recolored, resized and cloned, but FL Studio's scripting API can't delete one.
 
-> **No playlist clips** — FL Studio's scripting API (still in FL Studio 2026, API 45) can't place or read clips in the playlist. Lay out sections with markers (`fl_add_markers`) and drag the patterns in yourself. Markers can't be moved (delete and add them again), and a position holds one marker at most.
+> **No playlist clips** — FL Studio's scripting API (still in FL Studio 2026, API 45) can't place or read clips in the playlist. Lay out sections with markers (`fl_add_markers`) and drag the patterns in yourself. Markers can't be moved (delete and add them again), and the API can't add a marker where one already is (`fl_add_markers` reports the clash).
 
-> **Undo needs a save point** — FL doesn't record changes made through the API to notes, steps, patterns or playlist tracks in its undo history (mixer and plugin knobs, and added markers, get their own entries). Call `fl_save_undo_point` before each batch of changes, then `fl_undo(to_save_point=True)` reverts all of it and saves the point again for the next batch.
+> **Undo needs a save point** — FL doesn't record changes made through the API to notes, steps, patterns or playlist tracks in its undo history (mixer and plugin knobs, and added or deleted markers, get their own entries). Call `fl_save_undo_point` before each batch of changes, then `fl_undo(to_save_point=True)` reverts all of it and saves the point again for the next batch.
 
 > **Save your work** — Every change made through these tools lives only in the running FL Studio until the project is saved. Save often (`fl_save_project`): if FL crashes, only its autosaves (the project's `Backup` folder) are left.
 
@@ -165,7 +174,7 @@ https://github.com/user-attachments/assets/c2b1a5e7-1640-41fa-82bc-18ca7cbae9e8
 
 ## Requirements
 
-- **FL Studio 20.7+** (MIDI Controller Scripting API); marker positions, section loops and the time signature need FL Studio 2025 or later (tested on FL Studio 2026)
+- **FL Studio 20.7+** (MIDI Controller Scripting API); marker positions and deletion, section loops and the time signature need FL Studio 2025 or later (tested on FL Studio 2026)
 - **Python 3.10+**
 - **macOS** or **Windows**
   - macOS: IAC Driver (built-in, needs to be enabled)
@@ -406,6 +415,9 @@ fl-studio-mcp
 | `fl_set_channel_name` | Rename channel |
 | `fl_set_channel_color` | Set channel color |
 | `fl_route_channel_to_mixer` | Route to mixer track |
+| `fl_list_sample_folders` | List the browser's sample folders with their indexed file counts (Windows only) |
+| `fl_find_samples` | Search the sample folders (FL's browser index) by words in the path (Windows only) |
+| `fl_load_sample` | Load an audio file into a new, colored Sampler channel on a free mixer track |
 | `fl_get_grid_bit` | Get step sequencer step |
 | `fl_set_grid_bit` | Set step sequencer step |
 | `fl_get_step_sequence` | Get full pattern |
@@ -416,6 +428,7 @@ fl-studio-mcp
 | Tool | Description |
 |------|-------------|
 | `fl_find_plugins` | Search installed plugins by name |
+| `fl_load_instrument` | Load an instrument into a new, colored channel on a free mixer track |
 | `fl_is_plugin_valid` | Check if plugin exists |
 | `fl_get_plugin_name` | Get plugin name |
 | `fl_get_plugin_param_count` | Get parameter count |
@@ -642,11 +655,13 @@ fl-studio-mcp/
 │   │   ├── piano_roll.py         # Piano roll notes and patterns
 │   │   ├── playlist.py           # Markers and playlist tracks (incl. mute/solo)
 │   │   ├── plugins.py
+│   │   ├── samples.py            # Sample search and Sampler loading
 │   │   └── transport.py          # Transport, project save and undo
 │   └── utils/
 │       ├── connection.py         # FL Studio connection wrapper
 │       ├── fl_trigger.py         # Piano roll keystroke trigger, FL window lookup
-│       └── midi_connection.py    # MIDI + JSON communication layer
+│       ├── midi_connection.py    # MIDI + JSON communication layer
+│       └── samples.py            # FL's browser index, sample folders, Sampler presets
 ├── install.sh                    # One-command installer (macOS/Linux)
 └── install.ps1                   # One-command installer (Windows)
 ```

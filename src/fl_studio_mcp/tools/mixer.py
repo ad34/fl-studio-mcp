@@ -63,6 +63,10 @@ def register_mixer_tools(mcp: FastMCP) -> None:
             conn.send_command("transport.setLoopMode", {"mode": "song"})
             conn.read_until("transport.getStatus", None,
                             lambda s: s.get("loop_mode") == "song")
+        # A time selection would keep playback inside it: lift it meanwhile
+        selection = status.get("selection")
+        if selection:
+            conn.send_command("arrangement.clearSelection")
         for _ in range(5):
             result = conn.send_command("transport.setPosition", {"bar": start_bar})
             if not result.get("success", False) and "error" in result:
@@ -87,6 +91,10 @@ def register_mixer_tools(mcp: FastMCP) -> None:
                 time.sleep(interval)
         finally:
             conn.send_command("transport.stop")
+            if selection:
+                conn.send_command("arrangement.setSelection", {
+                    "start_tick": selection["start_tick"], "end_tick": selection["end_tick"],
+                    "move_playhead": False})
             if status.get("loop_mode") != "song":
                 previous = status.get("loop_mode", "pattern")
                 conn.send_command("transport.setLoopMode", {"mode": previous})

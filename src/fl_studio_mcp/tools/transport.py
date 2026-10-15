@@ -21,13 +21,17 @@ def register_transport_tools(mcp: FastMCP) -> None:
         If playing, pauses playback.
         """
         conn = get_connection()
+        before = conn.send_command("transport.getStatus")
         result = conn.send_command("transport.start")
 
         if not result.get("success", False) and "error" in result:
             return f"Error: {result['error']}"
 
-        is_playing = result.get("is_playing", False)
-        return f"Playback {'started' if is_playing else 'paused'}"
+        # FL starts or pauses after the command returns
+        was_playing = before.get("is_playing", False)
+        status = conn.read_until("transport.getStatus", None,
+                                 lambda s: s.get("is_playing") != was_playing)
+        return f"Playback {'started' if status.get('is_playing') else 'paused'}"
 
     @mcp.tool()
     def fl_stop() -> str:
@@ -62,8 +66,10 @@ def register_transport_tools(mcp: FastMCP) -> None:
     def fl_get_transport_status() -> dict:
         """Get current transport status including playback and recording state.
 
-        Returns information about whether FL Studio is playing, recording,
-        the current position, and loop mode.
+        Returns whether FL Studio is playing or recording, the position
+        (bar:step:tick), the loop mode, the tempo, the bar length in ticks
+        (from the time signature) and the playlist time selection, if any
+        ({"start_bar", "end_bar", ...}; song playback stays inside it).
         """
         conn = get_connection()
         result = conn.send_command("transport.getStatus")
@@ -77,6 +83,8 @@ def register_transport_tools(mcp: FastMCP) -> None:
             "position": result.get("position", ""),
             "loop_mode": result.get("loop_mode", "pattern"),
             "tempo": result.get("tempo", 0),
+            "ticks_per_bar": result.get("ticks_per_bar"),
+            "selection": result.get("selection"),
         }
 
     @mcp.tool()
@@ -104,29 +112,43 @@ def register_transport_tools(mcp: FastMCP) -> None:
         return f"Tempo set to {tempo:g} BPM"
 
     @mcp.tool()
-    def fl_set_song_position(position: float, mode: int = 2) -> str:
-        """Set the playback position in FL Studio.
+    def fl_set_song_position(bar: float | None = None, seconds: float | None = None) -> str:
+        """Move the playhead to a bar or a time. Give exactly one of them.
+
+        In pattern mode this moves within the current pattern; switch to song
+        mode first (fl_set_loop_mode) to move in the song. With a playlist
+        time selection active, FL keeps the playhead inside it.
 
         Args:
-            position: The position value. Interpretation depends on mode.
-            mode: Position format:
-                  0 = Percentage (0.0 to 1.0)
-                  1 = Time in milliseconds
-                  2 = Time in seconds (default)
-                  3 = Position in ticks
-                  4 = Position as bars:steps:ticks (encoded)
+            bar: Bar number from 1, as in the playlist ruler (2.5 = middle of
+                bar 2); follows the project's time signature
+            seconds: Time from the song start, in seconds
         """
+        if (bar is None) == (seconds is None):
+            return "Error: give either bar or seconds"
+        if bar is not None:
+            params: dict = {"bar": bar}
+        elif seconds < 0:
+            return "Error: seconds can't be negative"
+        else:
+            # FL's SONGLENGTH_S mode
+            params = {"position": seconds, "mode": 1}
         conn = get_connection()
-        result = conn.send_command("transport.setPosition", {
-            "position": position,
-            "mode": mode,
-        })
+        result = conn.send_command("transport.setPosition", params)
 
         if not result.get("success", False) and "error" in result:
             return f"Error: {result['error']}"
 
-        new_pos = result.get("position", "")
-        return f"Position set to {new_pos}"
+        # FL moves the playhead after the command returns: read it separately
+        status = conn.send_command("transport.getStatus")
+        text = f"Position set to {status.get('position', '')} (bar:step:tick)"
+        if status.get("loop_mode") == "pattern":
+            text += "; FL is in pattern mode, so this is a position in the pattern"
+        selection = status.get("selection")
+        if selection:
+            text += (f"; a time selection (bars {selection['start_bar']} to "
+                     f"{selection['end_bar']}) keeps the playhead inside it")
+        return text
 
     @mcp.tool()
     def fl_get_song_length() -> dict:
@@ -197,6 +219,28 @@ def register_transport_tools(mcp: FastMCP) -> None:
             return (f"Save requested but FL still reports unsaved changes "
                     f"({project}); a dialog may be open in FL.")
         return f"Saved: {project}"
+
+    @mcp.tool()
+    def fl_set_time_signature(numerator: int, denominator: int) -> str:
+        """Set the project's time signature, e.g. 3/4 or 6/8.
+
+        Bar numbers in the other tools (song position, markers, sections)
+        follow it. Set it before adding markers: markers and clips keep their
+        position in ticks, so their bar numbers change (and can become
+        fractional). Time signature markers placed in the playlist are not
+        taken into account. FL doesn't record the change in its undo history.
+
+        Args:
+            numerator: Beats per bar, 1-16
+            denominator: Beat value: 2, 4, 8 or 16
+        """
+        result = get_connection().send_command(
+            "project.setTimeSignature", {"numerator": numerator, "denominator": denominator}
+        )
+        if not result.get("success", False) and "error" in result:
+            return f"Error: {result['error']}"
+        return (f"Time signature set to {numerator}/{denominator} "
+                f"({result.get('ticks_per_bar')} ticks per bar at {result.get('ppq')} PPQ)")
 
     @mcp.tool()
     def fl_get_undo_history() -> dict:

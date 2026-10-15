@@ -42,14 +42,17 @@ This is a fork of [karl-andres/fl-studio-mcp](https://github.com/karl-andres/fl-
 
 **Patterns & playlist**
 - Create, select, read, list, rename, recolor, resize and clone patterns (`fl_create_pattern`, `fl_select_pattern`, `fl_get_current_pattern`, `fl_get_patterns`, `fl_set_pattern`, `fl_clone_pattern`)
-- Playlist markers (`fl_add_markers`, `fl_get_markers`) and playlist track name, color, mute and solo (`fl_get_playlist_tracks`, `fl_set_playlist_track`)
+- Playlist markers with their positions, and marker deletion (`fl_add_markers`, `fl_get_markers`, `fl_delete_marker`)
+- Loop a section by marker name or bars (`fl_loop_section`, `fl_clear_time_selection`)
+- Playlist track name, color, mute and solo (`fl_get_playlist_tracks`, `fl_set_playlist_track`)
 
 **Project**
 - Save, or save as a new version, without ever overwriting an autosave backup (`fl_get_project_state`, `fl_save_project`)
 - Undo points and undo/redo, including reverting changes FL itself doesn't record (`fl_save_undo_point`, `fl_undo`, `fl_redo`, `fl_get_undo_history`)
 
 **Transport, plugins and piano roll**
-- Set the tempo, read it in the transport status, set the position by bar (`fl_set_tempo`)
+- Set the tempo (`fl_set_tempo`) and the time signature (`fl_set_time_signature`); bar numbers everywhere follow the time signature
+- Move the playhead by bar or seconds (`fl_set_song_position`)
 - Plugin parameter search and paging, preset names (`fl_find_plugin_params`)
 - The piano roll opens on the requested channel and refuses channels hidden by the channel rack filter; slide/porta notes
 
@@ -83,10 +86,11 @@ https://github.com/user-attachments/assets/c2b1a5e7-1640-41fa-82bc-18ca7cbae9e8
 
 - Play, pause, stop playback
 - Toggle recording
-- Set playback position
+- Move the playhead by bar or seconds
 - Get song length and position
 - Control loop mode (pattern/song)
-- Adjust playback speed and tempo
+- **Loop a section** by marker name or bars (selects it in the playlist)
+- Adjust playback speed and tempo, set the time signature
 
 ### Project
 
@@ -128,7 +132,7 @@ https://github.com/user-attachments/assets/c2b1a5e7-1640-41fa-82bc-18ca7cbae9e8
 
 - Create, select and read the current pattern (the one piano roll edits go to)
 - List every pattern with its name, color and length; rename, recolor, resize and clone patterns
-- Add and list playlist markers to lay out song sections
+- Add, list (with their bars) and delete playlist markers to lay out song sections
 - Read, rename, recolor, mute and solo playlist tracks
 
 ### Piano Roll Control
@@ -149,7 +153,7 @@ https://github.com/user-attachments/assets/c2b1a5e7-1640-41fa-82bc-18ca7cbae9e8
 
 > **No pattern deletion** — Patterns can be listed, created, selected, renamed, recolored, resized and cloned, but FL Studio's scripting API can't delete one.
 
-> **No playlist clips** — FL Studio's scripting API (still in FL Studio 2026, API 45) can't place or read clips in the playlist. Lay out sections with markers (`fl_add_markers`) and drag the patterns in yourself. Markers expose their names only: they can't be moved or deleted through the API, except by undoing (`fl_undo`) right after adding them.
+> **No playlist clips** — FL Studio's scripting API (still in FL Studio 2026, API 45) can't place or read clips in the playlist. Lay out sections with markers (`fl_add_markers`) and drag the patterns in yourself. Markers can't be moved (delete and add them again), and a position holds one marker at most.
 
 > **Undo needs a save point** — FL doesn't record changes made through the API to notes, steps, patterns or playlist tracks in its undo history (mixer and plugin knobs, and added markers, get their own entries). Call `fl_save_undo_point` before each batch of changes, then `fl_undo(to_save_point=True)` reverts all of it and saves the point again for the next batch.
 
@@ -161,7 +165,7 @@ https://github.com/user-attachments/assets/c2b1a5e7-1640-41fa-82bc-18ca7cbae9e8
 
 ## Requirements
 
-- **FL Studio 20.7+** (MIDI Controller Scripting API)
+- **FL Studio 20.7+** (MIDI Controller Scripting API); marker positions, section loops and the time signature need FL Studio 2025 or later (tested on FL Studio 2026)
 - **Python 3.10+**
 - **macOS** or **Windows**
   - macOS: IAC Driver (built-in, needs to be enabled)
@@ -343,11 +347,12 @@ fl-studio-mcp
 | `fl_stop` | Stop playback |
 | `fl_record` | Toggle recording |
 | `fl_get_transport_status` | Get playback/recording state |
-| `fl_set_song_position` | Set playback position |
+| `fl_set_song_position` | Move the playhead to a bar or a time in seconds |
 | `fl_get_song_length` | Get song duration |
 | `fl_set_loop_mode` | Switch between pattern/song mode |
 | `fl_set_playback_speed` | Adjust playback speed (0.25x–4x) |
 | `fl_set_tempo` | Set the project tempo |
+| `fl_set_time_signature` | Set the project time signature (bar numbers follow it) |
 
 ### Project
 
@@ -433,8 +438,11 @@ fl-studio-mcp
 | `fl_get_patterns` | List the used patterns with name, color and length in steps |
 | `fl_set_pattern` | Rename, recolor and/or resize a pattern |
 | `fl_clone_pattern` | Clone a pattern right after itself and select the copy |
-| `fl_get_markers` | List playlist marker names, in timeline order |
-| `fl_add_markers` | Add playlist markers (existing names are skipped) |
+| `fl_get_markers` | List playlist markers in timeline order, with their bars |
+| `fl_add_markers` | Add playlist markers (existing names and taken positions are skipped) |
+| `fl_delete_marker` | Delete a playlist marker by name |
+| `fl_loop_section` | Select a section (marker or bars) to loop in song mode |
+| `fl_clear_time_selection` | Remove the playlist time selection |
 | `fl_get_playlist_tracks` | Get playlist track names, colors, mute and solo state |
 | `fl_set_playlist_track` | Rename, recolor, mute and/or solo a playlist track |
 

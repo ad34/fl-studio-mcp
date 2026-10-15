@@ -40,14 +40,16 @@ This server provides tools to control FL Studio through its Python scripting API
 FL Studio must be running with the FLStudioMCP MIDI controller enabled.
 
 Available tool categories:
-- Transport: Play, stop, record, tempo, position control
+- Transport: Play, stop, record, tempo, time signature, position by bar or
+  seconds, section loops (fl_loop_section, by marker or bars)
 - Mixer: Volume, pan, stereo separation, mute, solo, track management,
   effect slots (load, mix/dry-wet, bypass), routing and send levels
 - Channels: Channel info, note triggering, step sequencer
 - Plugins: Parameter control, preset navigation, plugin search
 - Patterns: list, create, select, rename, recolor, resize, clone (piano roll
   edits go to the selected one)
-- Playlist: markers, track names, colors, mute and solo
+- Playlist: markers (with their bars; add, delete), track names, colors,
+  mute and solo
 - Project: save, undo history
 
 Before each batch of changes, call fl_save_undo_point: FL doesn't record

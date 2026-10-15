@@ -156,6 +156,8 @@ def dispatch_command(action: str, params: dict) -> dict:
         return handle_project_get_state()
     elif action == "project.save":
         return handle_project_save(params)
+    elif action == "project.setTimeSignature":
+        return handle_project_set_time_signature(params)
 
     # Undo history
     elif action == "undo.getState":
@@ -192,6 +194,14 @@ def dispatch_command(action: str, params: dict) -> dict:
         return handle_arrangement_get_markers()
     elif action == "arrangement.addMarkers":
         return handle_arrangement_add_markers(params)
+    elif action == "arrangement.getMarkerSections":
+        return handle_arrangement_get_marker_sections()
+    elif action == "arrangement.setSelection":
+        return handle_arrangement_set_selection(params)
+    elif action == "arrangement.clearSelection":
+        return handle_arrangement_clear_selection()
+    elif action == "arrangement.deleteMarker":
+        return handle_arrangement_delete_marker(params)
     elif action == "playlist.getTracks":
         return handle_playlist_get_tracks(params)
     elif action == "playlist.setTrack":
@@ -338,18 +348,22 @@ def handle_transport_get_status() -> dict:
         "position": transport.getSongPosHint(),
         "loop_mode": "song" if loop_mode == 1 else "pattern",
         "tempo": tempo / 1000 if tempo > 1000 else tempo,
+        "ticks_per_bar": _ticks_per_bar(),
+        "selection": _selection(),
     }
 
 
 def handle_transport_set_position(params: dict) -> dict:
     """Set playback position."""
     if "bar" in params:
-        # Bar numbers start at 1, as in the playlist ruler (4/4)
-        ticks = (params["bar"] - 1) * 4 * general.getRecPPQ()
-        transport.setSongPos(int(ticks), midi.SONGLENGTH_ABSTICKS)
+        # Bar numbers start at 1, as in the playlist ruler
+        if params["bar"] < 1:
+            raise ValueError(f"Bar numbers start at 1 (got {params['bar']})")
+        ticks = (params["bar"] - 1) * _ticks_per_bar()
+        transport.setSongPos(round(ticks), midi.SONGLENGTH_ABSTICKS)
         return {"position": transport.getSongPosHint()}
     position = params.get("position", 0)
-    mode = params.get("mode", 2)  # Default: seconds
+    mode = params.get("mode", midi.SONGLENGTH_S)
     transport.setSongPos(position, mode)
     return {"position": transport.getSongPosHint()}
 
@@ -380,6 +394,19 @@ def handle_project_save(params: dict) -> dict:
     command = midi.FPT_SaveNew if params.get("new_version", False) else midi.FPT_Save
     transport.globalTransport(command, 1)
     return {"saved": True, "new_version": command == midi.FPT_SaveNew}
+
+
+def handle_project_set_time_signature(params: dict) -> dict:
+    """Set the project's time signature (not a playlist time signature marker)."""
+    if not hasattr(general, "setNumerator"):
+        raise ValueError("Setting the time signature needs a newer FL Studio (2025 or later)")
+    numerator, denominator = params["numerator"], params["denominator"]
+    # FL rejects other values, and silently ignores a denominator like 3
+    if not 1 <= numerator <= 16 or denominator not in (2, 4, 8, 16):
+        raise ValueError("Numerator must be 1-16 and denominator 2, 4, 8 or 16")
+    general.setNumerator(numerator)
+    general.setDenominator(denominator)
+    return {"ticks_per_bar": _ticks_per_bar(), "ppq": general.getRecPPQ()}
 
 
 # =============================================================================
@@ -612,17 +639,133 @@ def _marker_names() -> list:
     return names
 
 
+def _ticks_per_bar() -> int:
+    """Bar length from the project's time signature (PPQ * 4 * num / den).
+
+    Time signature markers in the playlist are not taken into account.
+    """
+    return general.getRecPPB()
+
+
+def _bar_of(ticks: int) -> float:
+    """Bar number (from 1) of a tick position; fractional between bar lines."""
+    bar = ticks / _ticks_per_bar() + 1
+    return int(bar) if bar == int(bar) else round(bar, 4)
+
+
+def _has_selection_api() -> bool:
+    return hasattr(arrangement, "selectionSet")  # FL Studio 2025+
+
+
+def _check_selection_api() -> None:
+    if not _has_selection_api():
+        raise ValueError("Time selections and marker positions need a newer FL Studio")
+
+
+def _selection():
+    """The playlist time selection in ticks and bars, or None."""
+    if not _has_selection_api() or not arrangement.selectionIsActive():
+        return None
+    start, end = arrangement.selectionStart(), arrangement.selectionEnd()
+    return {"start_tick": start, "end_tick": end,
+            "start_bar": _bar_of(start), "end_bar": _bar_of(end)}
+
+
+def _marker_sections() -> dict:
+    """Start and end ticks of each marker (by index), read in song mode.
+
+    FL only gives marker names, but jumping to a marker selects its section,
+    up to the next marker (no end for the last one). A marker sharing its
+    position with another one is never landed on, so it is missing.
+    """
+    count = len(_marker_names())
+    if not count:
+        return {}
+    _check_selection_api()
+    if transport.getLoopMode() != 1:
+        raise ValueError("Marker positions can only be read in song mode")
+    position = transport.getSongPos(midi.SONGLENGTH_ABSTICKS)
+    selection = _selection()
+
+    sections = {}
+    try:
+        transport.setSongPos(0, midi.SONGLENGTH_ABSTICKS)
+        # Past the last marker a jump wraps around to the first, so count
+        # jumps from the song start visit every marker, even one at bar 1
+        for _ in range(count):
+            index = arrangement.jumpToMarker(1, True)
+            end = arrangement.selectionEnd()
+            sections[index] = (arrangement.selectionStart(), end if end >= 0 else None)
+    finally:
+        if selection:
+            arrangement.selectionSet(selection["start_tick"], selection["end_tick"])
+        else:
+            arrangement.selectionClear()
+        transport.setSongPos(position, midi.SONGLENGTH_ABSTICKS)
+    return sections
+
+
 def handle_arrangement_get_markers() -> dict:
-    """Names of the playlist markers, in order (FL doesn't expose their times)."""
+    """Names of the playlist markers, in timeline order."""
     return {"markers": _marker_names()}
+
+
+def handle_arrangement_get_marker_sections() -> dict:
+    """Name, start and end (the next marker's position) of every marker."""
+    sections = _marker_sections()
+    markers = []
+    for index, name in enumerate(_marker_names()):
+        start, end = sections.get(index, (None, None))
+        markers.append({
+            "index": index,
+            "name": name,
+            "bar": None if start is None else _bar_of(start),
+            "end_bar": None if end is None else _bar_of(end),
+            "start_tick": start,
+            "end_tick": end,
+        })
+    return {"markers": markers}
+
+
+def handle_arrangement_set_selection(params: dict) -> dict:
+    """Select a section and move the playhead to its start (song mode only).
+
+    Takes start_tick/end_tick, or start_bar/end_bar (end exclusive).
+    """
+    _check_selection_api()
+    if transport.getLoopMode() != 1:
+        raise ValueError("Switch FL Studio to song mode first")
+    if "start_tick" in params:
+        start, end = params["start_tick"], params["end_tick"]
+    else:
+        start_bar, end_bar = params["start_bar"], params["end_bar"]
+        if start_bar < 1:
+            raise ValueError(f"Bar numbers start at 1 (got {start_bar})")
+        start = round((start_bar - 1) * _ticks_per_bar())
+        end = round((end_bar - 1) * _ticks_per_bar())
+    if start < 0 or end <= start:
+        raise ValueError("The section must end after it starts")
+    arrangement.selectionSet(start, end)
+    if params.get("move_playhead", True):
+        transport.setSongPos(start, midi.SONGLENGTH_ABSTICKS)
+    return {"selection": _selection()}
+
+
+def handle_arrangement_clear_selection() -> dict:
+    """Remove the playlist time selection."""
+    _check_selection_api()
+    arrangement.selectionClear()
+    return {"cleared": True}
 
 
 def handle_arrangement_add_markers(params: dict) -> dict:
     """Add markers at bar numbers (from 1); names already present are skipped."""
-    beats_per_bar = params.get("beats_per_bar", 4)
-    ticks_per_bar = general.getRecPPQ() * beats_per_bar
-    existing = set(_marker_names())
-    added, skipped = [], []
+    if params.get("beats_per_bar"):
+        ticks_per_bar = general.getRecPPQ() * params["beats_per_bar"]
+    else:
+        ticks_per_bar = _ticks_per_bar()
+    existing = _marker_names()
+    added, skipped, occupied = [], [], []
     for marker in params.get("markers", []):
         bar, name = marker["bar"], marker["name"]
         if bar < 1:
@@ -630,10 +773,37 @@ def handle_arrangement_add_markers(params: dict) -> dict:
         if name in existing:
             skipped.append(name)
             continue
-        arrangement.addAutoTimeMarker(int((bar - 1) * ticks_per_bar), name)
-        existing.add(name)
-        added.append(name)
-    return {"added": added, "skipped": skipped}
+        tick = round((bar - 1) * ticks_per_bar)
+        arrangement.addAutoTimeMarker(tick, name)
+        after = _marker_names()
+        if name not in after:
+            # FL toggles markers: at a position that already has one, adding
+            # removes that marker instead. Put it back and report the clash.
+            removed = [n for n in existing if n not in after]
+            if removed:
+                arrangement.addAutoTimeMarker(tick, removed[0])
+                after = _marker_names()
+            occupied.append({"name": name, "bar": bar, "taken_by": removed[0] if removed else None})
+        else:
+            added.append(name)
+        existing = after
+    return {"added": added, "skipped": skipped, "occupied": occupied}
+
+
+def handle_arrangement_delete_marker(params: dict) -> dict:
+    """Delete a marker by name (song mode only)."""
+    name = params["name"]
+    names = _marker_names()
+    if name not in names:
+        raise ValueError(f"No marker named '{name}'")
+    start = _marker_sections().get(names.index(name), (None, None))[0]
+    if start is None:
+        raise ValueError(f"FL can't locate marker '{name}'")
+    # Adding a marker where one already is removes that marker instead
+    arrangement.addAutoTimeMarker(start, name)
+    if name in _marker_names():
+        raise ValueError(f"FL Studio did not delete marker '{name}'")
+    return {"deleted": name, "bar": _bar_of(start)}
 
 
 def _check_playlist_track(index: int) -> None:

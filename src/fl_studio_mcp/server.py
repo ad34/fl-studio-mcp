@@ -13,7 +13,7 @@ Requirements:
 
 Limitations:
 - Can load effects into mixer slots, but not instruments into the channel rack
-- Cannot create new patterns programmatically
+- Cannot place clips in the playlist or delete patterns
 """
 
 from __future__ import annotations
@@ -45,8 +45,14 @@ Available tool categories:
   effect slots (load, mix/dry-wet, bypass), routing and send levels
 - Channels: Channel info, note triggering, step sequencer
 - Plugins: Parameter control, preset navigation, plugin search
-- Patterns: create, select, read the current one (piano roll edits go to it)
-- Playlist: markers, track names and colors
+- Patterns: list, create, select, rename, recolor, resize, clone (piano roll
+  edits go to the selected one)
+- Playlist: markers, track names, colors, mute and solo
+- Project: save, undo history
+
+Before each batch of changes, call fl_save_undo_point: FL doesn't record
+changes made through these tools to notes, steps, patterns or playlist tracks
+in its undo history, so only fl_undo(to_save_point=True) can revert them.
 
 Mixer effect slots have their own Mix knob (dry/wet) that scales the whole
 effect and is not a plugin parameter. Check it (fl_get_track_fx or
@@ -55,8 +61,9 @@ fl_get_mixer_track_info) before judging how strong an effect is.
 Important limitations:
 1. Effects can be loaded into mixer slots (fl_load_effect), but instruments
    can't be added to the channel rack - only existing ones can be controlled
-2. Clips can't be placed or read in the playlist (no API): lay out sections
-   with markers (fl_add_markers) and let the user drag patterns onto them
+2. Clips can't be placed or read in the playlist (no API, still the case in
+   FL Studio 2026): lay out sections with markers (fl_add_markers), name and
+   color the patterns, and let the user drag them onto the playlist
 3. Note triggering (fl_trigger_note) is real-time only - notes won't persist
    unless FL Studio is recording. Use step sequencer (fl_set_grid_bit) for
    persistent drum patterns.

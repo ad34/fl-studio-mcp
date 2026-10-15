@@ -399,6 +399,93 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
         return f"Pattern {result.get('index')} '{result.get('name', '')}' created and selected"
 
     @mcp.tool()
+    def fl_get_patterns() -> dict:
+        """List every used pattern (and the selected one) with its name, color and length.
+
+        Returns {"patterns": [{"index", "name", "color": {"r", "g", "b"},
+        "length_steps", "empty"}], "current"}; patterns are numbered from 1.
+        length_steps counts channel rack steps (16 = one bar of 4/4).
+        """
+        result = get_connection().send_command("patterns.getAll")
+        if not result.get("success", False) and "error" in result:
+            return {"error": result["error"]}
+        return {"patterns": result.get("patterns", []), "current": result.get("current")}
+
+    @mcp.tool()
+    def fl_set_pattern(
+        index: int,
+        name: str | None = None,
+        red: int | None = None,
+        green: int | None = None,
+        blue: int | None = None,
+        length_steps: int | None = None,
+    ) -> dict:
+        """Rename, recolor and/or resize a pattern.
+
+        Args:
+            index: Pattern number, from 1
+            name: New name ("" restores the default "Pattern n")
+            red: Red component (0-255); give red, green and blue together
+            green: Green component (0-255)
+            blue: Blue component (0-255)
+            length_steps: Pattern length in channel rack steps, 16 = one bar
+                of 4/4 (0 = automatic, after which FL reports the computed length)
+        """
+        params: dict = {"index": index}
+        if name is not None:
+            params["name"] = name
+        rgb = (red, green, blue)
+        if any(c is not None for c in rgb):
+            if any(c is None or not 0 <= c <= 255 for c in rgb):
+                return {"error": "Give red, green and blue together, each 0-255"}
+            params["color"] = {"r": red, "g": green, "b": blue}
+        if length_steps is not None:
+            if length_steps < 0:
+                return {"error": "length_steps must be 0 (automatic) or more"}
+            params["length_steps"] = length_steps
+
+        conn = get_connection()
+        result = conn.send_command("patterns.set", params)
+        if not result.get("success", False) and "error" in result:
+            return {"error": result["error"]}
+
+        # FL can apply the changes after the command returns: read them back
+        def applied(info: dict) -> bool:
+            return (
+                ("name" not in params or not name or info.get("name") == name)
+                and ("color" not in params or info.get("color") == params["color"])
+                and (not length_steps or info.get("length_steps") == length_steps)
+            )
+
+        info = conn.read_until("patterns.getInfo", {"index": index}, applied)
+        if not info.get("success", False) and "error" in info:
+            return {"error": info["error"]}
+        pattern = {k: info.get(k) for k in ("index", "name", "color", "length_steps", "empty")}
+        if not applied(info):
+            return {"error": "FL Studio did not apply every change", "pattern": pattern}
+        return pattern
+
+    @mcp.tool()
+    def fl_clone_pattern(index: int | None = None, name: str = "") -> str:
+        """Clone a pattern (notes, steps and settings) and select the copy.
+
+        The copy is inserted right after the source, so every later pattern's
+        number goes up by one. FL closes the piano roll when cloning.
+
+        Args:
+            index: Pattern number to clone, from 1 (default: the selected one)
+            name: Optional name for the copy
+        """
+        params: dict = {"name": name}
+        if index is not None:
+            params["index"] = index
+        result = get_connection().send_command("patterns.clone", params)
+        if not result.get("success", False) and "error" in result:
+            return f"Error: {result['error']}"
+        return (f"Pattern {result.get('source')} cloned to pattern {result.get('index')} "
+                f"'{result.get('name', '')}', now selected")
+
+    @mcp.tool()
     def fl_get_piano_roll_state(channel: int | None = None) -> dict:
         """Get the notes of a channel in the current pattern.
 

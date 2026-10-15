@@ -67,7 +67,12 @@ class FLConnection:
         Raises:
             RuntimeError: If not connected or command fails
         """
-        return self._midi.send_command(action, params, timeout)
+        result = self._midi.send_command(action, params, timeout)
+        # An outdated controller script answers unknown actions with
+        # {"success": True, "error": ...}: never let that pass as a success
+        if result.get("error"):
+            result["success"] = False
+        return result
 
     def read_until(
         self,

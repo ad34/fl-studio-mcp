@@ -157,6 +157,14 @@ def dispatch_command(action: str, params: dict) -> dict:
     elif action == "project.save":
         return handle_project_save(params)
 
+    # Undo history
+    elif action == "undo.getState":
+        return handle_undo_get_state()
+    elif action == "undo.savePoint":
+        return handle_undo_save_point(params)
+    elif action == "undo.move":
+        return handle_undo_move(params)
+
     # UI commands
     elif action == "ui.openPianoRoll":
         return handle_ui_open_piano_roll(params)
@@ -170,6 +178,14 @@ def dispatch_command(action: str, params: dict) -> dict:
         return handle_patterns_select(params)
     elif action == "patterns.create":
         return handle_patterns_create(params)
+    elif action == "patterns.getAll":
+        return handle_patterns_get_all()
+    elif action == "patterns.getInfo":
+        return handle_patterns_get_info(params)
+    elif action == "patterns.set":
+        return handle_patterns_set(params)
+    elif action == "patterns.clone":
+        return handle_patterns_clone(params)
 
     # Arrangement / playlist commands
     elif action == "arrangement.getMarkers":
@@ -282,7 +298,9 @@ def dispatch_command(action: str, params: dict) -> dict:
         return handle_plugins_get_color(params)
 
     else:
-        return {"error": f"Unknown action: {action}"}
+        # Raise so the response has success False: a server newer than this
+        # script must not mistake a missing action for a successful one
+        raise ValueError(f"Unknown action: {action} (reload the script in FL Studio)")
 
 
 # =============================================================================
@@ -362,6 +380,51 @@ def handle_project_save(params: dict) -> dict:
     command = midi.FPT_SaveNew if params.get("new_version", False) else midi.FPT_Save
     transport.globalTransport(command, 1)
     return {"saved": True, "new_version": command == midi.FPT_SaveNew}
+
+
+# =============================================================================
+# Undo Handlers
+# =============================================================================
+
+
+def handle_undo_get_state() -> dict:
+    """Position in FL's undo history (0 = latest state) and its length."""
+    return {
+        "position": general.getUndoHistoryLast(),
+        "length": general.getUndoHistoryPos(),
+        "hint": general.getUndoLevelHint(),
+    }
+
+
+# What a save point snapshots: pattern data (notes, steps), the playlist and
+# its markers. Mixer and plugin knob changes get their own history entries.
+UNDO_POINT_FLAGS = midi.UF_PR | midi.UF_PL | midi.UF_PRMarker | midi.UF_PLMarker
+
+
+def handle_undo_save_point(params: dict) -> dict:
+    """Snapshot the project into a named undo entry, before making changes."""
+    name = params.get("name") or "MCP changes"
+    general.saveUndo(name, params.get("flags", UNDO_POINT_FLAGS))
+    return {"name": name}
+
+
+def handle_undo_move(params: dict) -> dict:
+    """Undo (steps > 0) or redo (steps < 0) through FL's undo history."""
+    steps = params.get("steps", 1)
+    position = general.getUndoHistoryLast()
+    length = general.getUndoHistoryPos()
+    if steps > 0 and position + steps > length - 1:
+        raise ValueError(f"Only {max(length - 1 - position, 0)} step(s) left to undo")
+    if steps < 0 and position + steps < 0:
+        raise ValueError(f"Only {position} step(s) left to redo")
+    for _ in range(abs(steps)):
+        if steps > 0:
+            general.undoUp()
+        else:
+            general.undoDown()
+    # FL moves through the history after this callback returns: read the new
+    # position with a separate command (undo.getState)
+    return {"from_position": position}
 
 
 def handle_transport_set_loop_mode(params: dict) -> dict:
@@ -444,10 +507,94 @@ def handle_patterns_get_current() -> dict:
 def handle_patterns_select(params: dict) -> dict:
     """Select a pattern by number."""
     index = params.get("index", 1)
-    if not 1 <= index <= patterns.patternCount():
-        raise ValueError(f"Pattern {index} does not exist")
+    _check_pattern(index)
     patterns.jumpToPattern(index)
     return {"index": index, "name": patterns.getPatternName(index)}
+
+
+def _check_pattern(index: int) -> None:
+    """Raise if the pattern number is out of range (patterns are numbered from 1)."""
+    # Every number up to patternMax() is a usable pattern, even an empty one
+    if not 1 <= index <= patterns.patternMax():
+        raise ValueError(f"Pattern {index} does not exist (1 to {patterns.patternMax()})")
+
+
+def _pattern_info(index: int) -> dict:
+    color = patterns.getPatternColor(index) & 0xFFFFFF  # 0xRRGGBB
+    info = {
+        "index": index,
+        "name": patterns.getPatternName(index),
+        "color": {"r": color >> 16, "g": (color >> 8) & 0xFF, "b": color & 0xFF},
+        "length_steps": patterns.getPatternLength(index),
+    }
+    if hasattr(patterns, "isPatternDefault"):  # API 23+
+        info["empty"] = patterns.isPatternDefault(index) == 1
+    return info
+
+
+def handle_patterns_get_all() -> dict:
+    """Name, color and length of every used pattern, plus the selected one."""
+    # patternCount() only counts the patterns changed from their default
+    # state, and they need not be adjacent: scan until all of them are found
+    remaining = patterns.patternCount()
+    current = patterns.patternNumber()
+    if not hasattr(patterns, "isPatternDefault"):  # API < 23: assume no gaps
+        indexes = sorted(set(range(1, remaining + 1)) | {current})
+        return {"patterns": [_pattern_info(i) for i in indexes], "current": current}
+    found = []
+    for index in range(1, patterns.patternMax() + 1):
+        if remaining == 0 and index > current:
+            break
+        used = not patterns.isPatternDefault(index)
+        remaining -= used
+        if used or index == current:
+            found.append(_pattern_info(index))
+    return {"patterns": found, "current": current}
+
+
+def handle_patterns_get_info(params: dict) -> dict:
+    """Name, color and length of one pattern."""
+    index = params.get("index", 1)
+    _check_pattern(index)
+    return _pattern_info(index)
+
+
+def handle_patterns_set(params: dict) -> dict:
+    """Rename, recolor and/or resize a pattern."""
+    index = params.get("index", 1)
+    _check_pattern(index)
+    if "length_steps" in params and not hasattr(patterns, "setPatternLength"):
+        raise ValueError("Setting a pattern length needs FL Studio 2025 or newer")
+    if "name" in params:
+        patterns.setPatternName(index, params["name"])
+    if "color" in params:
+        r, g, b = (params["color"][k] for k in ("r", "g", "b"))
+        patterns.setPatternColor(index, (r << 16) | (g << 8) | b)
+    if "length_steps" in params:
+        # 0 makes the length automatic again (getPatternLength then returns
+        # the computed length, not 0)
+        patterns.setPatternLength(index, params["length_steps"])
+    # Read the result back with a separate command (patterns.getInfo): FL can
+    # apply changes after this callback returns
+    return {"index": index}
+
+
+def handle_patterns_clone(params: dict) -> dict:
+    """Clone a pattern (default: the selected one); FL selects the copy.
+
+    The copy is inserted right after the source: later patterns move up by one.
+    """
+    if not hasattr(patterns, "clonePattern"):  # API 25+
+        raise ValueError("Cloning patterns needs a newer FL Studio (API 25)")
+    index = params["index"] if params.get("index") is not None else patterns.patternNumber()
+    _check_pattern(index)
+    patterns.clonePattern(index)
+    clone = patterns.patternNumber()
+    if clone == index:
+        raise ValueError(f"FL Studio did not clone pattern {index}")
+    if params.get("name"):
+        patterns.setPatternName(clone, params["name"])
+    return {"source": index, "index": clone, "name": patterns.getPatternName(clone)}
 
 
 # =============================================================================
@@ -489,25 +636,49 @@ def handle_arrangement_add_markers(params: dict) -> dict:
     return {"added": added, "skipped": skipped}
 
 
+def _check_playlist_track(index: int) -> None:
+    """Raise if the playlist track doesn't exist (tracks are numbered from 1)."""
+    if not 1 <= index <= playlist.trackCount():
+        raise ValueError(f"Playlist track {index} does not exist")
+
+
+def _playlist_track_info(index: int) -> dict:
+    return {
+        "index": index,
+        "name": playlist.getTrackName(index),
+        "color": playlist.getTrackColor(index),
+        "is_muted": playlist.isTrackMuted(index) == 1,
+        "is_solo": playlist.isTrackSolo(index) == 1,
+    }
+
+
 def handle_playlist_get_tracks(params: dict) -> dict:
-    """Names and colors of the first playlist tracks (numbered from 1)."""
+    """Name, color, mute and solo state of the first playlist tracks (from 1)."""
+    if "index" in params:
+        _check_playlist_track(params["index"])
+        return {"tracks": [_playlist_track_info(params["index"])]}
     count = min(params.get("count", 20), playlist.trackCount())
-    return {"tracks": [
-        {"index": i, "name": playlist.getTrackName(i), "color": playlist.getTrackColor(i)}
-        for i in range(1, count + 1)
-    ]}
+    return {"tracks": [_playlist_track_info(i) for i in range(1, count + 1)]}
 
 
 def handle_playlist_set_track(params: dict) -> dict:
-    """Rename and/or recolor a playlist track (numbered from 1)."""
+    """Rename, recolor, mute and/or solo a playlist track (numbered from 1)."""
     index = params.get("index", 1)
-    if not 1 <= index <= playlist.trackCount():
-        raise ValueError(f"Playlist track {index} does not exist")
+    _check_playlist_track(index)
     if "name" in params:
         playlist.setTrackName(index, params["name"])
     if "color" in params:
         playlist.setTrackColor(index, params["color"])
-    return {"index": index, "name": playlist.getTrackName(index), "color": playlist.getTrackColor(index)}
+    # muteTrack/soloTrack only take a target value since API 30: toggle when
+    # the state differs instead. Solo goes first, since unsolo unmutes every
+    # track and would undo a mute made before it.
+    if "solo" in params and (playlist.isTrackSolo(index) == 1) != params["solo"]:
+        playlist.soloTrack(index)
+    if "muted" in params and (playlist.isTrackMuted(index) == 1) != params["muted"]:
+        playlist.muteTrack(index)
+    # Mute/solo can apply after this callback returns: read them back with a
+    # separate command (playlist.getTracks)
+    return {"index": index, "name": playlist.getTrackName(index)}
 
 
 def handle_patterns_create(params: dict) -> dict:

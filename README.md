@@ -12,6 +12,7 @@
 
 ## Table of Contents
 
+- [About this fork](#about-this-fork)
 - [Demo](#demo)
 - [Features](#features)
 - [Limitations](#limitations)
@@ -26,6 +27,37 @@
 - [Architecture](#architecture)
 - [Development](#development)
 - [Credits](#credits)
+
+---
+
+## About this fork
+
+This is a fork of [karl-andres/fl-studio-mcp](https://github.com/karl-andres/fl-studio-mcp), tested on FL Studio 2026 (scripting API 45) on Windows. It adds:
+
+**Mixer**
+- Effect slots: read and set each slot's Mix (dry/wet) knob, turn slots on or off (`fl_get_track_fx`, `fl_set_fx_mix`, `fl_set_fx_enabled`)
+- Load any effect from FL's Plugin database into a mixer slot (`fl_find_plugins`, `fl_load_effect`)
+- Routing with send levels, exclusive routing and a routing overview (`fl_route_track`, `fl_get_track_routing`)
+- Level metering: plays the song and samples every track's peak meter (`fl_measure_levels`)
+
+**Patterns & playlist**
+- Create, select, read, list, rename, recolor, resize and clone patterns (`fl_create_pattern`, `fl_select_pattern`, `fl_get_current_pattern`, `fl_get_patterns`, `fl_set_pattern`, `fl_clone_pattern`)
+- Playlist markers (`fl_add_markers`, `fl_get_markers`) and playlist track name, color, mute and solo (`fl_get_playlist_tracks`, `fl_set_playlist_track`)
+
+**Project**
+- Save, or save as a new version, without ever overwriting an autosave backup (`fl_get_project_state`, `fl_save_project`)
+- Undo points and undo/redo, including reverting changes FL itself doesn't record (`fl_save_undo_point`, `fl_undo`, `fl_redo`, `fl_get_undo_history`)
+
+**Transport, plugins and piano roll**
+- Set the tempo, read it in the transport status, set the position by bar (`fl_set_tempo`)
+- Plugin parameter search and paging, preset names (`fl_find_plugin_params`)
+- The piano roll opens on the requested channel and refuses channels hidden by the channel rack filter; slide/porta notes
+
+**Reliability**
+- Bridge commands are serialized: parallel tool calls used to overwrite each other's command and response files
+- Changes FL applies after the command returns (slot mix, stereo separation, plugin parameters, mute/solo, patterns, undo) are confirmed with separate reads; plugin parameters are rewritten until they hold
+- An action the controller script doesn't know is reported as an error that says to reload the script
+- Fixes for stereo separation docs, channel volume/pan arguments, song length units and FL's hidden "Current" mixer track
 
 ---
 
@@ -61,6 +93,7 @@ https://github.com/user-attachments/assets/c2b1a5e7-1640-41fa-82bc-18ca7cbae9e8
 - **Save the project** (like Ctrl+S, or as a new version like Ctrl+N), confirmed by FL's unsaved-changes flag
 - Check which project file is open and whether it has unsaved changes
 - Refuses to save over one of FL's autosave backups
+- **Undo**: save an undo point before a batch of changes, then return to it in one call (notes, steps, patterns, playlist, markers and mixer knobs); step through FL's history with undo/redo
 
 ### Mixer Control
 
@@ -94,8 +127,9 @@ https://github.com/user-attachments/assets/c2b1a5e7-1640-41fa-82bc-18ca7cbae9e8
 ### Patterns & Playlist
 
 - Create, select and read the current pattern (the one piano roll edits go to)
+- List every pattern with its name, color and length; rename, recolor, resize and clone patterns
 - Add and list playlist markers to lay out song sections
-- Read, rename and recolor playlist tracks
+- Read, rename, recolor, mute and solo playlist tracks
 
 ### Piano Roll Control
 
@@ -113,9 +147,11 @@ https://github.com/user-attachments/assets/c2b1a5e7-1640-41fa-82bc-18ca7cbae9e8
 
 > **Cannot load instruments** — Effects can be loaded into mixer slots (`fl_load_effect`), but FL Studio's scripting API has no way to add a generator to the Channel Rack. Instruments have to be loaded by hand; after that their parameters can be controlled. Effect loading goes through the call FL's own Mackie script uses to drop Edison on a track, and needs the Plugin database on the same drive as FL Studio.
 
-> **Limited pattern management** — Patterns can be created (optionally named), selected and read (`fl_create_pattern`, `fl_select_pattern`, `fl_get_current_pattern`), and notes go into the selected one. Renaming an existing pattern, cloning and deleting aren't available yet.
+> **No pattern deletion** — Patterns can be listed, created, selected, renamed, recolored, resized and cloned, but FL Studio's scripting API can't delete one.
 
-> **No playlist clips** — FL Studio's scripting API can't place or read clips in the playlist. Lay out sections with markers (`fl_add_markers`) and drag the patterns in yourself. Markers expose their names only: they can't be moved or deleted through the API.
+> **No playlist clips** — FL Studio's scripting API (still in FL Studio 2026, API 45) can't place or read clips in the playlist. Lay out sections with markers (`fl_add_markers`) and drag the patterns in yourself. Markers expose their names only: they can't be moved or deleted through the API, except by undoing (`fl_undo`) right after adding them.
+
+> **Undo needs a save point** — FL doesn't record changes made through the API to notes, steps, patterns or playlist tracks in its undo history (mixer and plugin knobs, and added markers, get their own entries). Call `fl_save_undo_point` before each batch of changes, then `fl_undo(to_save_point=True)` reverts all of it and saves the point again for the next batch.
 
 > **Save your work** — Every change made through these tools lives only in the running FL Studio until the project is saved. Save often (`fl_save_project`): if FL crashes, only its autosaves (the project's `Backup` folder) are left.
 
@@ -319,6 +355,10 @@ fl-studio-mcp
 |------|-------------|
 | `fl_get_project_state` | Open project file (from FL's window title, Windows only) and unsaved-changes flag |
 | `fl_save_project` | Save the project, or save it as a new version; refuses on an autosave backup |
+| `fl_save_undo_point` | Snapshot patterns, playlist and markers into a named undo entry |
+| `fl_undo` | Step back through the undo history, or back to the last undo point |
+| `fl_redo` | Step forward through the undo history |
+| `fl_get_undo_history` | Position in the undo history and its length |
 
 ### Mixer
 
@@ -390,10 +430,13 @@ fl-studio-mcp
 | `fl_get_current_pattern` | Get the selected pattern (the one piano roll edits go to) |
 | `fl_select_pattern` | Select a pattern |
 | `fl_create_pattern` | Create a new pattern and select it |
+| `fl_get_patterns` | List the used patterns with name, color and length in steps |
+| `fl_set_pattern` | Rename, recolor and/or resize a pattern |
+| `fl_clone_pattern` | Clone a pattern right after itself and select the copy |
 | `fl_get_markers` | List playlist marker names, in timeline order |
 | `fl_add_markers` | Add playlist markers (existing names are skipped) |
-| `fl_get_playlist_tracks` | Get playlist track names and colors |
-| `fl_set_playlist_track` | Rename and/or recolor a playlist track |
+| `fl_get_playlist_tracks` | Get playlist track names, colors, mute and solo state |
+| `fl_set_playlist_track` | Rename, recolor, mute and/or solo a playlist track |
 
 ### Piano Roll
 
@@ -589,9 +632,9 @@ fl-studio-mcp/
 │   │   ├── channels.py
 │   │   ├── mixer.py
 │   │   ├── piano_roll.py         # Piano roll notes and patterns
-│   │   ├── playlist.py           # Markers and playlist tracks
+│   │   ├── playlist.py           # Markers and playlist tracks (incl. mute/solo)
 │   │   ├── plugins.py
-│   │   └── transport.py          # Transport and project save
+│   │   └── transport.py          # Transport, project save and undo
 │   └── utils/
 │       ├── connection.py         # FL Studio connection wrapper
 │       ├── fl_trigger.py         # Piano roll keystroke trigger, FL window lookup

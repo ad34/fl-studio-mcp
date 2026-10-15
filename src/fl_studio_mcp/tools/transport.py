@@ -199,6 +199,135 @@ def register_transport_tools(mcp: FastMCP) -> None:
         return f"Saved: {project}"
 
     @mcp.tool()
+    def fl_get_undo_history() -> dict:
+        """Get the position in FL Studio's undo history.
+
+        position: how many steps back from the latest state (0 = nothing undone).
+        length: number of entries in the history. hint: FL's "position/length".
+        """
+        result = get_connection().send_command("undo.getState")
+        if not result.get("success", False) and "error" in result:
+            return {"error": result["error"]}
+        return {k: result.get(k) for k in ("position", "length", "hint")}
+
+    # History length right after the last fl_save_undo_point of this server run
+    save_point: dict = {}
+
+    def _save_undo_point(name: str) -> str | None:
+        """Add the undo point and remember it; returns an error message or None."""
+        conn = get_connection()
+        before = conn.send_command("undo.getState")
+        if not before.get("success", False) and "error" in before:
+            return f"Error: {before['error']}"
+        result = conn.send_command("undo.savePoint", {"name": name})
+        if not result.get("success", False) and "error" in result:
+            return f"Error: {result['error']}"
+        # Like any edit, the entry drops the undone (redo) entries above the
+        # current position, and shows up after the command returns
+        expected = before["length"] - before["position"] + 1
+        after = conn.read_until("undo.getState", None,
+                                lambda s: s.get("position") == 0 and s.get("length") == expected)
+        if after.get("length") != expected or after.get("position") != 0:
+            return "Error: FL Studio did not add the undo point"
+        save_point.update(name=name, length=expected)
+        return None
+
+    @mcp.tool()
+    def fl_save_undo_point(name: str = "MCP changes") -> str:
+        """Snapshot notes, steps, patterns, the playlist and markers into FL's undo history.
+
+        Call it before every batch of changes: FL doesn't record changes made
+        through these tools to notes, steps, patterns or playlist tracks, so
+        without a save point fl_undo can't revert them. Mixer and plugin knob
+        changes and added markers get their own entries. fl_undo(to_save_point=True)
+        then returns to this state. The point is kept in the server's memory
+        and lost if the server restarts.
+
+        Args:
+            name: Entry name shown in FL's Edit > History
+        """
+        error = _save_undo_point(name)
+        if error:
+            return error
+        return f"Undo point '{name}' saved (history entry {save_point['length']})"
+
+    def _move_undo(steps: int) -> str:
+        conn = get_connection()
+        result = conn.send_command("undo.move", {"steps": steps})
+        if not result.get("success", False) and "error" in result:
+            return f"Error: {result['error']}"
+        if "from_position" not in result:
+            return "Error: unexpected response from FL Studio; reload the script in FL"
+        # FL moves through the history after the command returns
+        target = result["from_position"] + steps
+        state = conn.read_until("undo.getState", None,
+                                lambda s: s.get("position") == target)
+        if not state.get("success", False) and "error" in state:
+            return f"Error: undo requested but reading the history failed: {state['error']}"
+        if state.get("position") != target:
+            return (f"Error: FL's undo position is {state.get('position')}, "
+                    f"expected {target}")
+        return f"Undo history at {state.get('hint')} ({target} step(s) back from latest)"
+
+    @mcp.tool()
+    def fl_undo(steps: int = 1, to_save_point: bool = False) -> str:
+        """Step back through FL Studio's undo history (Edit > History).
+
+        Each step undoes FL's newest history entry, not necessarily your last
+        tool call: changes made through these tools to notes, steps, patterns
+        and playlist tracks create no entry, so a plain step undoes something
+        older (a mixer change, a marker, or the user's own edit). To revert
+        those changes, call fl_save_undo_point before the batch and use
+        to_save_point=True.
+
+        Args:
+            steps: Number of history entries to step back (default 1)
+            to_save_point: Instead of steps, return to the state saved by the
+                last fl_save_undo_point, undoing every entry added since. The
+                point is saved again right after, so the next batch can be
+                reverted the same way (and nothing is left to redo).
+        """
+        if not to_save_point:
+            if steps < 1:
+                return "Error: steps must be at least 1"
+            return _move_undo(steps)
+
+        if not save_point:
+            return "Error: no undo point saved yet (fl_save_undo_point)"
+        name = save_point["name"]
+        state = get_connection().send_command("undo.getState")
+        if not state.get("success", False) and "error" in state:
+            return f"Error: {state['error']}"
+        added = state["length"] - save_point["length"]
+        # Stepping back past the save point's entry restores its snapshot
+        steps = added + 1 - state["position"]
+        if added < 0 or steps <= 0:
+            return (f"Error: undo point '{name}' is no longer reachable (the history "
+                    f"was undone past it or cut); save a new one with fl_save_undo_point")
+        moved = _move_undo(steps)
+        if moved.startswith("Error"):
+            return moved
+        # Snapshot the restored state again, so a revert after the next batch works
+        error = _save_undo_point(name)
+        if error:
+            return f"Back at undo point '{name}', but saving it again failed: {error}"
+        return f"Back at undo point '{name}'; it is saved again for the next batch"
+
+    @mcp.tool()
+    def fl_redo(steps: int = 1) -> str:
+        """Redo changes undone with fl_undo(steps).
+
+        There is nothing to redo after fl_undo(to_save_point=True), which saves
+        the point again.
+
+        Args:
+            steps: Number of history entries to step forward (default 1)
+        """
+        if steps < 1:
+            return "Error: steps must be at least 1"
+        return _move_undo(-steps)
+
+    @mcp.tool()
     def fl_set_loop_mode(mode: str) -> str:
         """Set the loop mode between pattern and song.
 

@@ -15,6 +15,8 @@ import platform
 import re
 from pathlib import Path
 
+from fl_studio_mcp.utils.channel_presets import fst_bytes, fst_events
+
 AUDIO_EXTENSIONS = (".wav", ".aif", ".aiff", ".flac", ".mp3", ".ogg", ".wv", ".m4a", ".rx2")
 
 _cache: dict = {"mtime": None, "files": []}
@@ -223,46 +225,6 @@ FST_CHANNEL_NAME = 192
 FST_SAMPLE_FILE = 196
 
 
-def _fst_events(data: bytes) -> list[tuple[int, bytes]]:
-    """(id, value) events of an FL state file: FLhd header, then FLdt events."""
-    pos = 8 + int.from_bytes(data[4:8], "little") + 8  # skip FLhd, then FLdt and its size
-    events = []
-    while pos < len(data):
-        event_id = data[pos]
-        pos += 1
-        if event_id < 192:
-            # 1, 2 or 4 byte values below 64, 128 and 192
-            size = 1 if event_id < 64 else 2 if event_id < 128 else 4
-        else:
-            size, shift = 0, 0
-            while True:
-                byte = data[pos]
-                pos += 1
-                size |= (byte & 0x7F) << shift
-                shift += 7
-                if byte < 0x80:
-                    break
-        events.append((event_id, data[pos:pos + size]))
-        pos += size
-    return events
-
-
-def _fst_bytes(header: bytes, events: list[tuple[int, bytes]]) -> bytes:
-    body = bytearray()
-    for event_id, value in events:
-        body.append(event_id)
-        if event_id >= 192:
-            size = len(value)
-            while True:
-                byte = size & 0x7F
-                size >>= 7
-                body.append(byte | 0x80 if size else byte)
-                if not size:
-                    break
-        body += value
-    return header + b"FLdt" + len(body).to_bytes(4, "little") + bytes(body)
-
-
 def sampler_preset(template: bytes, sample_path: str) -> bytes:
     """FL's SamplerTrack.fst channel template with a sample file added."""
     header = template[:8 + int.from_bytes(template[4:8], "little")]
@@ -273,11 +235,11 @@ def sampler_preset(template: bytes, sample_path: str) -> bytes:
         raise ValueError("FL's Sampler presets can't hold this path (non-Western "
                          "characters): copy or rename the file") from None
     events = []
-    for event_id, value in _fst_events(template):
+    for event_id, value in fst_events(template):
         if event_id == FST_SAMPLE_FILE:
             continue
         if event_id == FST_CHANNEL_NAME:
             # Same place as in FL's factory Sampler presets
             events.append((FST_SAMPLE_FILE, path))
         events.append((event_id, value))
-    return _fst_bytes(header, events)
+    return fst_bytes(header, events)

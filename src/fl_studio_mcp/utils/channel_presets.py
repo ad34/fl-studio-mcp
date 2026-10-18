@@ -40,9 +40,65 @@ def safe_file_stem(name: str) -> str:
     return stem or "Channel"
 
 
+def fst_events(data: bytes) -> list[tuple[int, bytes]]:
+    """(id, value) events of an FL state file: FLhd header, then FLdt events."""
+    pos = 8 + int.from_bytes(data[4:8], "little") + 8  # skip FLhd, then FLdt and its size
+    events = []
+    while pos < len(data):
+        event_id = data[pos]
+        pos += 1
+        if event_id < 192:
+            # 1, 2 or 4 byte values below 64, 128 and 192
+            size = 1 if event_id < 64 else 2 if event_id < 128 else 4
+        else:
+            size, shift = 0, 0
+            while True:
+                byte = data[pos]
+                pos += 1
+                size |= (byte & 0x7F) << shift
+                shift += 7
+                if byte < 0x80:
+                    break
+        events.append((event_id, data[pos:pos + size]))
+        pos += size
+    return events
+
+
+def fst_bytes(header: bytes, events: list[tuple[int, bytes]]) -> bytes:
+    """An FL state file from its FLhd header and (id, value) events."""
+    body = bytearray()
+    for event_id, value in events:
+        body.append(event_id)
+        if event_id >= 192:
+            size = len(value)
+            while True:
+                byte = size & 0x7F
+                size >>= 7
+                body.append(byte | 0x80 if size else byte)
+                if not size:
+                    break
+        body += value
+    return header + b"FLdt" + len(body).to_bytes(4, "little") + bytes(body)
+
+
 def bridge_paths(conn: Any) -> dict:
     """FL's Data/System folder and the bridge script's folder."""
     return conn.send_command("system.getPaths")
+
+
+def load_preset(conn: Any, preset_data: bytes, stem: str, action: str,
+                params: dict, timeout: float) -> dict:
+    """Write `stem`.fst next to the bridge script and have the bridge load it with `action`."""
+    paths = bridge_paths(conn)
+    if not paths.get("success", False) and "error" in paths:
+        return paths
+    preset = Path(paths["script_dir"]) / f"{stem}.fst"
+    with _load_lock:
+        preset.write_bytes(preset_data)
+        try:
+            return conn.send_command(action, {**params, "preset": preset.name}, timeout=timeout)
+        finally:
+            preset.unlink(missing_ok=True)
 
 
 def add_channel(conn: Any, preset_data: bytes, channel_name: str,
@@ -56,21 +112,12 @@ def add_channel(conn: Any, preset_data: bytes, channel_name: str,
     rgb = parse_color(color) if color else None
     if color and rgb is None:
         return {"success": False, "error": f"color must be like #E57373 (got {color})"}
-    paths = bridge_paths(conn)
-    if not paths.get("success", False) and "error" in paths:
-        return paths
     stem = safe_file_stem(channel_name)
-    preset = Path(paths["script_dir"]) / f"{stem}.fst"
-    params: dict = {"preset": preset.name}
+    params: dict = {}
     if mixer_track is not None:
         params["mixer_track"] = mixer_track
-    with _load_lock:
-        preset.write_bytes(preset_data)
-        try:
-            # Big plugins can take a few seconds to load
-            result = conn.send_command("channels.addFromPreset", params, timeout=timeout)
-        finally:
-            preset.unlink(missing_ok=True)
+    # Big plugins can take a few seconds to load
+    result = load_preset(conn, preset_data, stem, "channels.addFromPreset", params, timeout)
     if not result.get("success"):
         return result
     index, track = result["channel"], result["mixer_track"]

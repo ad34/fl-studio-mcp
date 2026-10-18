@@ -62,7 +62,8 @@ def register_channel_tools(mcp: FastMCP) -> None:
     def fl_get_all_channels() -> list[dict]:
         """Get information about all channels in the channel rack.
 
-        Returns a list of all channels with their basic properties.
+        Returns a list of all channels with their basic properties, including
+        whether each is an automation clip.
         """
         conn = get_connection()
         result = conn.send_command("channels.getAll")

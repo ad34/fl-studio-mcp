@@ -276,6 +276,10 @@ def dispatch_command(action: str, params: dict) -> dict:
         return handle_channels_route_to_mixer(params)
     elif action == "channels.addFromPreset":
         return handle_channels_add_from_preset(params)
+    elif action == "channels.addAutomationClip":
+        return handle_channels_add_automation_clip(params)
+    elif action == "automation.getTarget":
+        return handle_automation_get_target(params)
     elif action == "channels.showEditor":
         return handle_channels_show_editor(params)
     elif action == "ui.closeEmptySlotWindow":
@@ -1326,6 +1330,7 @@ def handle_channels_get_all() -> dict:
             "is_muted": channels.isChannelMuted(i, True) == 1,
             "is_selected": channels.isChannelSelected(i, True) == 1,
             "target_fx_track": channels.getTargetFxTrack(i, True),
+            "is_automation_clip": channels.getChannelType(i, True) == midi.CT_AutoClip,
         })
 
     return {"channels": channels_list}
@@ -1547,6 +1552,120 @@ def handle_channels_add_from_preset(params: dict) -> dict:
         "mixer_track": track,
         "mixer_track_name": mixer.getTrackName(track),
     }
+
+
+def _check_channel(index: int) -> None:
+    """Raise if the channel (global index) doesn't exist."""
+    if not 0 <= index < channels.channelCount(True):
+        raise ValueError(f"Channel {index} does not exist")
+
+
+def _automation_target(params: dict) -> tuple:
+    """REC event ID of the control to automate, and the name FL gives its clip."""
+    target = params.get("target", "")
+    track, slot = params.get("track"), params.get("slot")
+    channel, param = params.get("channel"), params.get("param")
+    if target in ("plugin", "fx_mix") and track is not None:
+        if slot is None:
+            raise ValueError("Give the effect's slot along with its mixer track")
+        _check_slot(track, slot)
+        prefix = f"{plugins.getPluginName(track, slot)} - {mixer.getTrackName(track)}"
+        if target == "fx_mix":
+            return _slot_event(track, slot, midi.REC_Plug_MixLevel), f"{prefix} - Mix level"
+        if param is None or not 0 <= param < plugins.getParamCount(track, slot, True):
+            raise ValueError(f"Give a parameter index of {plugins.getPluginName(track, slot)}")
+        event_id = mixer.getTrackPluginId(track, slot) + midi.REC_Plug_Plugin_First + param
+        return event_id, f"{prefix} - {plugins.getParamName(param, track, slot, True)}"
+    if target in ("mixer_volume", "mixer_pan"):
+        if track is None:
+            raise ValueError("Give the mixer track")
+        _check_track(track)
+        if target == "mixer_volume":
+            return _track_event(track, midi.REC_Mixer_Vol), f"{mixer.getTrackName(track)} - Volume"
+        return _track_event(track, midi.REC_Mixer_Pan), f"{mixer.getTrackName(track)} - Panning"
+    if target in ("plugin", "channel_volume", "channel_pan"):
+        if channel is None:
+            raise ValueError("Give a channel, or a mixer track and slot")
+        _check_channel(channel)
+        # Channel events are numbered by global channel index
+        base = midi.REC_Chan_First + channel * midi.REC_ItemRange
+        name = channels.getChannelName(channel, True)
+        if target == "channel_volume":
+            return base + midi.REC_Chan_Vol, f"{name} - Volume"
+        if target == "channel_pan":
+            return base + midi.REC_Chan_Pan, f"{name} - Panning"
+        if not plugins.isValid(channel, -1, True):
+            raise ValueError(f"Channel {channel} '{name}' has no plugin")
+        if param is None or not 0 <= param < plugins.getParamCount(channel, -1, True):
+            raise ValueError(f"Give a parameter index of channel {channel} '{name}'")
+        event_id = base + midi.REC_Chan_Plugin_First + param
+        return event_id, f"{name} - {plugins.getParamName(param, channel, -1, True)}"
+    if target == "fx_mix":
+        raise ValueError("Give the effect's mixer track and slot")
+    raise ValueError(f"Unknown automation target: {target}")
+
+
+def handle_automation_get_target(params: dict) -> dict:
+    """Describe the control an automation clip will drive, and where the clip will go."""
+    event_id, name = _automation_target(params)
+    if params.get("target") == "plugin":
+        if params.get("track") is not None:
+            index, slot = params["track"], params["slot"]
+        else:
+            index, slot = params["channel"], -1
+        value = plugins.getParamValue(params["param"], index, slot, True)
+        display = plugins.getParamValueString(params["param"], index, slot, True)
+    else:
+        value, display = device.getLinkedValue(event_id), _rec_display(event_id)
+    return {
+        "event_id": event_id,
+        "name": name,
+        "value": value,
+        "value_display": display,
+        # A clip added now gets this index, which its link must name
+        "next_channel": channels.channelCount(True),
+        "beats_per_bar": general.getRecPPB() / general.getRecPPQ(),
+    }
+
+
+def handle_channels_add_automation_clip(params: dict) -> dict:
+    """Add an automation clip from a preset next to this script.
+
+    The preset links the clip to its control by channel index, so the clip
+    must land at expected_index, after the last channel.
+    """
+    preset = params.get("preset", "")
+    if os.path.basename(preset) != preset or not preset.endswith(".fst"):
+        raise ValueError("preset must be a .fst file name in the script folder")
+    count = channels.channelCount(True)
+    if params.get("expected_index") != count:
+        raise ValueError("The channel rack changed while the clip was prepared: try again")
+    if count:
+        # FL adds the channel after the selected one
+        channels.selectOneChannel(count - 1, True)
+    # The launcher wants a mixer track, though an automation clip has no audio
+    try:
+        track = _free_mixer_track()
+    except ValueError:
+        track = mixer.trackCount() - 2  # the last insert
+    track_name = mixer.getTrackName(track)
+    try:
+        relative = os.path.relpath(str(SCRIPT_DIR / preset), _fl_data_system_dir())
+    except ValueError:
+        raise ValueError("FL Studio's settings folder must be on FL Studio's drive") from None
+    before = [channels.getChannelName(i, True) for i in range(count)]
+    ui.launchAudioEditor(False, "", track, relative, "")
+    if mixer.getTrackName(track) != track_name:
+        mixer.setTrackName(track, track_name)
+    after = [channels.getChannelName(i, True) for i in range(channels.channelCount(True))]
+    if len(after) != count + 1:
+        raise ValueError("FL Studio did not add the automation clip")
+    index = next((i for i, n in enumerate(before) if after[i] != n), count)
+    if index != count or channels.getChannelType(index, True) != midi.CT_AutoClip:
+        raise ValueError(
+            f"FL Studio added channel {index} '{after[index]}' instead of an automation "
+            f"clip at {count}: it may drive the wrong control, delete it")
+    return {"channel": index, "name": after[index], "mixer_track": track}
 
 
 def handle_channels_route_to_mixer(params: dict) -> dict:

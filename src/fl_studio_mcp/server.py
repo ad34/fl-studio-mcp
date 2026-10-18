@@ -22,6 +22,7 @@ from __future__ import annotations
 from fastmcp import FastMCP
 
 from fl_studio_mcp.tools import (
+    register_automation_tools,
     register_channel_tools,
     register_mixer_tools,
     register_piano_roll_tools,
@@ -55,6 +56,8 @@ Available tool categories:
   edits go to the selected one)
 - Playlist: markers (with their bars; add, delete), track names, colors,
   mute and solo
+- Automation: automation clips with points for plugin parameters, effect
+  Mix knobs, mixer and channel volume/pan (fl_create_automation_clip)
 - Project: save, undo history
 
 Before each batch of changes, call fl_save_undo_point: FL doesn't record
@@ -71,7 +74,9 @@ Important limitations:
    sample can't be swapped in an existing channel
 2. Clips can't be placed or read in the playlist (no API, still the case in
    FL Studio 2026): lay out sections with markers (fl_add_markers), name and
-   color the patterns, and let the user drag them onto the playlist
+   color the patterns, and let the user drag them onto the playlist. The same
+   goes for automation clips: fl_create_automation_clip adds them to the
+   channel rack, and they do nothing until placed
 3. Note triggering (fl_trigger_note) is real-time only - notes won't persist
    unless FL Studio is recording. Use step sequencer (fl_set_grid_bit) for
    persistent drum patterns.
@@ -167,6 +172,7 @@ register_plugin_tools(mcp)
 register_piano_roll_tools(mcp)
 register_playlist_tools(mcp)
 register_sample_tools(mcp)
+register_automation_tools(mcp)
 
 
 def main():

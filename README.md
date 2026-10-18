@@ -52,6 +52,10 @@ This is a fork of [karl-andres/fl-studio-mcp](https://github.com/karl-andres/fl-
 - Loop a section by marker name or bars (`fl_loop_section`, `fl_clear_time_selection`)
 - Playlist track name, color, mute and solo (`fl_get_playlist_tracks`, `fl_set_playlist_track`)
 
+**Automation**
+- Create automation clips with points and curves, linked to a plugin parameter, an effect's Mix knob, or a mixer or channel volume/pan (`fl_create_automation_clip`); you drag them onto the playlist
+- Automation clips are flagged in the channel list (`fl_get_all_channels`)
+
 **Project**
 - Save, or save as a new version, without ever overwriting an autosave backup (`fl_get_project_state`, `fl_save_project`)
 - Undo points and undo/redo, including reverting changes FL itself doesn't record (`fl_save_undo_point`, `fl_undo`, `fl_redo`, `fl_get_undo_history`)
@@ -144,6 +148,10 @@ https://github.com/user-attachments/assets/c2b1a5e7-1640-41fa-82bc-18ca7cbae9e8
 - Add, list (with their bars) and delete playlist markers to lay out song sections
 - Read, rename, recolor, mute and solo playlist tracks
 
+### Automation
+
+- Create automation clips with points and curves for plugin parameters (mixer effects and instruments), effect Mix knobs, and mixer and channel volume/pan, already linked to their control
+
 ### Piano Roll Control
 
 - **Add notes** to the piano roll with precise timing
@@ -162,7 +170,7 @@ https://github.com/user-attachments/assets/c2b1a5e7-1640-41fa-82bc-18ca7cbae9e8
 
 > **No pattern deletion** — Patterns can be listed, created, selected, renamed, recolored, resized and cloned, but FL Studio's scripting API can't delete one.
 
-> **No playlist clips** — FL Studio's scripting API (still in FL Studio 2026, API 45) can't place or read clips in the playlist. Lay out sections with markers (`fl_add_markers`) and drag the patterns in yourself. Markers can't be moved (delete and add them again), and the API can't add a marker where one already is (`fl_add_markers` reports the clash).
+> **No playlist clips** — FL Studio's scripting API (still in FL Studio 2026, API 45) can't place or read clips in the playlist. Lay out sections with markers (`fl_add_markers`) and drag the patterns in yourself. Automation clips too: `fl_create_automation_clip` adds them to the channel rack, linked and with their points, and they do nothing until you drag them onto a playlist track. Their points can't be read or edited afterwards: create a new clip instead. Markers can't be moved (delete and add them again), and the API can't add a marker where one already is (`fl_add_markers` reports the clash).
 
 > **Undo needs a save point** — FL doesn't record changes made through the API to notes, steps, patterns or playlist tracks in its undo history (mixer and plugin knobs, and added or deleted markers, get their own entries). Call `fl_save_undo_point` before each batch of changes, then `fl_undo(to_save_point=True)` reverts all of it and saves the point again for the next batch.
 
@@ -403,7 +411,7 @@ fl-studio-mcp
 |------|-------------|
 | `fl_get_channel_count` | Get number of channels |
 | `fl_get_channel_info` | Get channel details |
-| `fl_get_all_channels` | List all channels |
+| `fl_get_all_channels` | List all channels (automation clips are flagged) |
 | `fl_get_selected_channel` | Get selected channel |
 | `fl_select_channel` | Select/deselect channel |
 | `fl_select_one_channel` | Select channel exclusively |
@@ -458,6 +466,12 @@ fl-studio-mcp
 | `fl_clear_time_selection` | Remove the playlist time selection |
 | `fl_get_playlist_tracks` | Get playlist track names, colors, mute and solo state |
 | `fl_set_playlist_track` | Rename, recolor, mute and/or solo a playlist track |
+
+### Automation
+
+| Tool | Description |
+|------|-------------|
+| `fl_create_automation_clip` | Create an automation clip with points (position in bars, value, tension) linked to a plugin parameter, effect Mix knob, or mixer/channel volume or pan |
 
 ### Piano Roll
 
@@ -525,6 +539,14 @@ fl-studio-mcp
 "List the parameters of the plugin on channel 0 and set the filter cutoff to 50%"
 ```
 
+### Creating an Automation Clip
+
+```text
+"Make an 8-bar automation clip that opens Pro-Q 3's band 1 frequency on the master, slow at first"
+```
+
+The clip appears in the channel rack, already linked to the parameter: drag it onto a playlist track at the bar where it should start.
+
 ---
 
 ## Troubleshooting
@@ -555,6 +577,12 @@ fl-studio-mcp
 
 1. `fl_set_plugin_param_value` reads the value back and writes again until it holds; if it still reports the old value, the parameter is probably driven by an automation clip or a controller link
 2. Driven parameters are rewritten by FL during playback: set the slot's Mix knob with `fl_set_fx_mix` instead
+
+### An automation clip does nothing
+
+1. The clip only plays where it is placed: drag it from the channel rack onto a playlist track (the API can't place clips)
+2. A control driven by two automation clips jumps between them: mute or delete the other clip's playlist track or channel
+3. Clips work in song mode, not when a pattern is looping (`fl_set_loop_mode`)
 
 ### A new or updated tool says "Unknown action"
 
@@ -602,6 +630,9 @@ This MCP server uses a hybrid approach:
 4. MCP server reads response
 
 There is a single command/response file pair, so the server runs one command at a time even when a client calls several tools in parallel. FL applies some changes (slot mix, loop mode, volume...) only after the command that made them returns: tools that need the new state confirm it with separate reads.
+
+**Automation clips:**
+FL's scripting API can't create them, but FL ships a channel template for a new clip (`Data/System/AutoTrack.fst`), which the bridge can make FL load like any channel preset. The server adds the points and the link to the automated control to that template, the same events FL saves in project files, and writes it next to the bridge script (FL's Python can't write binary files). FL links the clip by channel index, so the bridge adds it after the last channel and checks it landed there. Like instruments and samples, this needs your Documents folder on the same drive as FL Studio.
 
 **Piano Roll:**
 1. MCP server writes note requests to JSON file

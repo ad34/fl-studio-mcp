@@ -54,6 +54,8 @@ This is a fork of [karl-andres/fl-studio-mcp](https://github.com/karl-andres/fl-
 
 **Automation**
 - Create automation clips with points and curves, linked to a plugin parameter, an effect's Mix knob, or a mixer or channel volume/pan (`fl_create_automation_clip`); you drag them onto the playlist
+- Ready-made shapes instead of points: ramp, sine, triangle, saw, square and a sidechain-like pump
+- Read the project's automation clips from the saved file: what each drives, its points and where it sits in the playlist (`fl_get_automation_clips`)
 - Automation clips are flagged in the channel list (`fl_get_all_channels`)
 
 **Project**
@@ -151,6 +153,8 @@ https://github.com/user-attachments/assets/c2b1a5e7-1640-41fa-82bc-18ca7cbae9e8
 ### Automation
 
 - Create automation clips with points and curves for plugin parameters (mixer effects and instruments), effect Mix knobs, and mixer and channel volume/pan, already linked to their control
+- Draw them from ready-made shapes: ramp, sine, triangle, saw, square, sidechain-like pump
+- Read every automation clip of the saved project: its target, points and playlist placements
 
 ### Piano Roll Control
 
@@ -170,7 +174,7 @@ https://github.com/user-attachments/assets/c2b1a5e7-1640-41fa-82bc-18ca7cbae9e8
 
 > **No pattern deletion** — Patterns can be listed, created, selected, renamed, recolored, resized and cloned, but FL Studio's scripting API can't delete one.
 
-> **No playlist clips** — FL Studio's scripting API (still in FL Studio 2026, API 45) can't place or read clips in the playlist. Lay out sections with markers (`fl_add_markers`) and drag the patterns in yourself. Automation clips too: `fl_create_automation_clip` adds them to the channel rack, linked and with their points, and they do nothing until you drag them onto a playlist track. Their points can't be read or edited afterwards: create a new clip instead. Markers can't be moved (delete and add them again), and the API can't add a marker where one already is (`fl_add_markers` reports the clash).
+> **No playlist clips** — FL Studio's scripting API (still in FL Studio 2026, API 45) can't place or read clips in the playlist. Lay out sections with markers (`fl_add_markers`) and drag the patterns in yourself. Automation clips too: `fl_create_automation_clip` adds them to the channel rack, linked and with their points, and they do nothing until you drag them onto a playlist track. `fl_get_automation_clips` reads clips and their placements from the saved project file, so it doesn't see changes made since the last save; a clip's points can't be edited, create a new clip instead. Markers can't be moved (delete and add them again), and the API can't add a marker where one already is (`fl_add_markers` reports the clash).
 
 > **Undo needs a save point** — FL doesn't record changes made through the API to notes, steps, patterns or playlist tracks in its undo history (mixer and plugin knobs, and added or deleted markers, get their own entries). Call `fl_save_undo_point` before each batch of changes, then `fl_undo(to_save_point=True)` reverts all of it and saves the point again for the next batch.
 
@@ -471,7 +475,8 @@ fl-studio-mcp
 
 | Tool | Description |
 |------|-------------|
-| `fl_create_automation_clip` | Create an automation clip with points (position in bars, value, tension) linked to a plugin parameter, effect Mix knob, or mixer/channel volume or pan |
+| `fl_create_automation_clip` | Create an automation clip from points (position in bars, value, tension) or a shape (ramp, sine, triangle, saw, square, pump), linked to a plugin parameter, effect Mix knob, or mixer/channel volume or pan |
+| `fl_get_automation_clips` | List the saved project's automation clips: target, points and playlist placements |
 
 ### Piano Roll
 
@@ -543,6 +548,14 @@ fl-studio-mcp
 
 ```text
 "Make an 8-bar automation clip that opens Pro-Q 3's band 1 frequency on the master, slow at first"
+```
+
+```text
+"Add a sidechain-style pump on mixer track 3's volume for 16 bars, ducking on every beat"
+```
+
+```text
+"Which automation clips does this project have, and which ones aren't in the playlist?"
 ```
 
 The clip appears in the channel rack, already linked to the parameter: drag it onto a playlist track at the bar where it should start.
@@ -632,7 +645,7 @@ This MCP server uses a hybrid approach:
 There is a single command/response file pair, so the server runs one command at a time even when a client calls several tools in parallel. FL applies some changes (slot mix, loop mode, volume...) only after the command that made them returns: tools that need the new state confirm it with separate reads.
 
 **Automation clips:**
-FL's scripting API can't create them, but FL ships a channel template for a new clip (`Data/System/AutoTrack.fst`), which the bridge can make FL load like any channel preset. The server adds the points and the link to the automated control to that template, the same events FL saves in project files, and writes it next to the bridge script (FL's Python can't write binary files). FL links the clip by channel index, so the bridge adds it after the last channel and checks it landed there. Like instruments and samples, this needs your Documents folder on the same drive as FL Studio.
+FL's scripting API can't create or read them, but FL ships a channel template for a new clip (`Data/System/AutoTrack.fst`), which the bridge can make FL load like any channel preset. The server adds the points and the link to the automated control to that template, the same events FL saves in project files, and writes it next to the bridge script (FL's Python can't write binary files). FL links the clip by channel index, so the bridge adds it after the last channel and checks it landed there. Like instruments and samples, this needs your Documents folder on the same drive as FL Studio. Reading clips goes through the saved project file instead: the server reads the same events there, plus the playlist records, and finds the open project's path in FL's recent files list (the window title only has its name).
 
 **Piano Roll:**
 1. MCP server writes note requests to JSON file
@@ -681,6 +694,7 @@ fl-studio-mcp/
 ├── src/fl_studio_mcp/
 │   ├── server.py                 # FastMCP server entry point
 │   ├── tools/                    # MCP tool implementations
+│   │   ├── automation.py         # Automation clips: create, read from the project file
 │   │   ├── channels.py
 │   │   ├── mixer.py
 │   │   ├── piano_roll.py         # Piano roll notes and patterns
@@ -689,10 +703,14 @@ fl-studio-mcp/
 │   │   ├── samples.py            # Sample search and Sampler loading
 │   │   └── transport.py          # Transport, project save and undo
 │   └── utils/
+│       ├── automation.py         # Automation clip points, shapes and presets
+│       ├── channel_presets.py    # Channel presets (.fst) and loading them through the bridge
 │       ├── connection.py         # FL Studio connection wrapper
 │       ├── fl_trigger.py         # Piano roll keystroke trigger, FL window lookup
 │       ├── midi_connection.py    # MIDI + JSON communication layer
+│       ├── project_file.py       # Automation clips and placements in saved projects (.flp)
 │       └── samples.py            # FL's browser index, sample folders, Sampler presets
+├── tests/                        # Automation presets, shapes and project file reading
 ├── install.sh                    # One-command installer (macOS/Linux)
 └── install.ps1                   # One-command installer (Windows)
 ```

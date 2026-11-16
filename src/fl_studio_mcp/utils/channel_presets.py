@@ -40,6 +40,10 @@ def safe_file_stem(name: str) -> str:
     return stem or "Channel"
 
 
+# An event in the 4-byte range whose value has 3 bytes
+FL_EVENT_3_BYTES = 172
+
+
 def fst_events(data: bytes) -> list[tuple[int, bytes]]:
     """(id, value) events of an FL state file: FLhd header, then FLdt events."""
     pos = 8 + int.from_bytes(data[4:8], "little") + 8  # skip FLhd, then FLdt and its size
@@ -47,7 +51,11 @@ def fst_events(data: bytes) -> list[tuple[int, bytes]]:
     while pos < len(data):
         event_id = data[pos]
         pos += 1
-        if event_id < 192:
+        if event_id == FL_EVENT_3_BYTES:
+            # FL 2025+ writes this one with 3 bytes, not 4: reading 4 shifts
+            # everything after it (checked on 137 projects)
+            size = 3
+        elif event_id < 192:
             # 1, 2 or 4 byte values below 64, 128 and 192
             size = 1 if event_id < 64 else 2 if event_id < 128 else 4
         else:

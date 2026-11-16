@@ -56,8 +56,10 @@ Available tool categories:
   edits go to the selected one)
 - Playlist: markers (with their bars; add, delete), track names, colors,
   mute and solo
-- Automation: automation clips with points for plugin parameters, effect
-  Mix knobs, mixer and channel volume/pan (fl_create_automation_clip)
+- Automation: automation clips from points or shapes (ramp, sine, pump...)
+  for plugin parameters, effect Mix knobs, mixer and channel volume/pan
+  (fl_create_automation_clip); read the saved project's clips, with their
+  targets, points and playlist placements (fl_get_automation_clips)
 - Project: save, undo history
 
 Before each batch of changes, call fl_save_undo_point: FL doesn't record
